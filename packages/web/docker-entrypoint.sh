@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Ensure data directory is writable by nextjs user
+chown nextjs:nodejs /app/data
+
+# Initialize database from template if volume is empty or DB is invalid
+if [ ! -s /app/data/grocery.db ]; then
+  echo "Initializing database from template..."
+  cp /app/init.db /app/data/grocery.db
+  chown nextjs:nodejs /app/data/grocery.db
+  echo "Database initialized."
+fi
+
+exec su-exec nextjs node server.js

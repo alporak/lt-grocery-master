@@ -1,0 +1,123 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Store {
+  id            Int       @id @default(autoincrement())
+  slug          String    @unique
+  name          String
+  chain         String
+  url           String
+  enabled       Boolean   @default(true)
+  lastScrapedAt DateTime?
+
+  products   Product[]
+  locations  StoreLocation[]
+  scrapeLogs ScrapeLog[]
+}
+
+model StoreLocation {
+  id           Int     @id @default(autoincrement())
+  storeId      Int
+  address      String
+  city         String
+  lat          Float?
+  lng          Float?
+  sizeCategory String  @default("MEDIUM")
+  openingHours String?
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@index([city])
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  storeId     Int
+  externalId  String
+  nameLt      String
+  nameEn      String?
+  categoryLt  String?
+  categoryEn  String?
+  brand       String?
+  weightValue Float?
+  weightUnit  String?
+  imageUrl    String?
+  productUrl  String?
+  barcode     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  store        Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  priceRecords PriceRecord[]
+
+  @@unique([storeId, externalId])
+  @@index([nameLt])
+  @@index([categoryLt])
+  @@index([storeId])
+}
+
+model PriceRecord {
+  id           Int      @id @default(autoincrement())
+  productId    Int
+  regularPrice Float
+  salePrice    Float?
+  unitPrice    Float?
+  unitLabel    String?
+  loyaltyPrice Float?
+  campaignText String?
+  scrapedAt    DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, scrapedAt])
+  @@index([scrapedAt])
+}
+
+model GroceryList {
+  id        Int      @id @default(autoincrement())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items GroceryListItem[]
+}
+
+model GroceryListItem {
+  id       Int     @id @default(autoincrement())
+  listId   Int
+  itemName String
+  quantity Float   @default(1)
+  unit     String?
+  checked  Boolean @default(false)
+
+  list GroceryList @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  @@index([listId])
+}
+
+model Settings {
+  key   String @id
+  value String
+}
+
+model ScrapeLog {
+  id           Int      @id @default(autoincrement())
+  storeId      Int
+  status       String   // running, success, error
+  productCount Int      @default(0)
+  errorMessage String?
+  startedAt    DateTime @default(now())
+  finishedAt   DateTime?
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@index([startedAt])
+}
