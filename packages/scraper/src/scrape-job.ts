@@ -5,6 +5,18 @@ import { BarboraScraper } from "./scrapers/barbora.js";
 import { RimiScraper } from "./scrapers/rimi.js";
 import { translateBatch } from "./translate.js";
 
+// Lithuanian diacritics map for search index generation
+function normalizeForIndex(text: string): string {
+  const LT: Record<string, string> = {
+    'ą': 'a', 'č': 'c', 'ę': 'e', 'ė': 'e', 'į': 'i',
+    'š': 's', 'ų': 'u', 'ū': 'u', 'ž': 'z',
+  };
+  let r = text.toLowerCase();
+  for (const [f, t] of Object.entries(LT)) r = r.replaceAll(f, t);
+  return r.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 interface Scraper {
   run(): Promise<ScrapedProduct[]>;
 }
@@ -82,6 +94,7 @@ async function saveProducts(storeId: number, products: ScrapedProduct[]) {
   for (const p of products) {
     try {
       // Upsert product
+      const searchIndex = normalizeForIndex(p.nameLt);
       const product = await prisma.product.upsert({
         where: {
           storeId_externalId: {
@@ -97,6 +110,7 @@ async function saveProducts(storeId: number, products: ScrapedProduct[]) {
           weightUnit: p.weightUnit || undefined,
           imageUrl: p.imageUrl || undefined,
           productUrl: p.productUrl || undefined,
+          searchIndex,
         },
         create: {
           storeId,
@@ -108,6 +122,7 @@ async function saveProducts(storeId: number, products: ScrapedProduct[]) {
           weightUnit: p.weightUnit || undefined,
           imageUrl: p.imageUrl || undefined,
           productUrl: p.productUrl || undefined,
+          searchIndex,
         },
       });
 

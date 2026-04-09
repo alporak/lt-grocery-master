@@ -1,4 +1,6 @@
 import { prisma } from "./db";
+import { normalizeText, buildSearchConditions } from "./search";
+import { haversineDistance } from "./distance";
 
 interface CompareItem {
   itemName: string;
@@ -27,6 +29,19 @@ interface StoreResult {
   matchedCount: number;
 }
 
+interface SmartRecommendation {
+  storeId: number;
+  storeName: string;
+  storeChain: string;
+  totalCost: number;
+  distanceKm: number | null;
+  travelPenalty: number;
+  missingPenalty: number;
+  smartScore: number;
+  matchedCount: number;
+  totalItems: number;
+}
+
 export interface CompareResult {
   storeResults: StoreResult[];
   cheapestStoreId: number | null;
@@ -41,6 +56,7 @@ export interface CompareResult {
     }>;
     totalCost: number;
   };
+  smartRecommendation?: SmartRecommendation[];
 }
 
 /**
@@ -49,7 +65,9 @@ export interface CompareResult {
  */
 export async function compareGroceryList(
   items: CompareItem[],
-  language: string = "lt"
+  language: string = "lt",
+  userLat?: number,
+  userLng?: number
 ): Promise<CompareResult> {
   const stores = await prisma.store.findMany({ where: { enabled: true } });
 
@@ -133,7 +151,7 @@ export async function compareGroceryList(
     };
   });
 
-  return {
+  const result: CompareResult = {
     storeResults,
     cheapestStoreId: cheapest?.storeId ?? null,
     cheapestTotal: cheapest?.totalCost ?? 0,
@@ -142,6 +160,67 @@ export async function compareGroceryList(
       totalCost: splitItems.reduce((sum, i) => sum + i.bestPrice, 0),
     },
   };
+
+  // Smart recommendation: distance-aware scoring
+  if (userLat && userLng) {
+    const storeIds = stores.map((s) => s.id);
+    const locations = await prisma.storeLocation.findMany({
+      where: { storeId: { in: storeIds }, lat: { not: null }, lng: { not: null } },
+      select: { storeId: true, lat: true, lng: true },
+    });
+
+    // Travel cost per km walked (time + effort equivalent in €)
+    const TRAVEL_COST_PER_KM = 1.0;
+    // Penalty multiplier for each missing item (need another trip)
+    const MISSING_PENALTY_MULT = 3.0;
+    // Average item cost estimate for missing penalty
+    const avgItemCost =
+      storeResults.reduce((s, r) => s + r.totalCost, 0) /
+        Math.max(storeResults.filter((r) => r.totalCost > 0).length, 1) /
+        Math.max(items.length, 1) || 2.0;
+
+    result.smartRecommendation = storeResults.map((sr) => {
+      // Find nearest location for this store's chain
+      const chainLocations = locations.filter((l) => l.storeId === sr.storeId);
+      let distanceKm: number | null = null;
+      if (chainLocations.length > 0) {
+        distanceKm = Math.min(
+          ...chainLocations.map((l) =>
+            haversineDistance(userLat, userLng, l.lat!, l.lng!)
+          )
+        );
+        distanceKm = Math.round(distanceKm * 100) / 100;
+      }
+
+      const travelPenalty = distanceKm !== null ? distanceKm * TRAVEL_COST_PER_KM : 0;
+      const missingItems = items.length - sr.matchedCount;
+      const missingPenalty = missingItems * avgItemCost * MISSING_PENALTY_MULT;
+
+      // Dynamic distance weight: for cheap lists, distance matters more
+      // For expensive lists (>€30), distance impact is proportionally smaller
+      const listValueFactor = Math.max(1, 10 / Math.max(sr.totalCost, 1));
+      const adjustedTravelPenalty = travelPenalty * Math.min(listValueFactor, 3);
+
+      const smartScore = sr.totalCost + adjustedTravelPenalty + missingPenalty;
+
+      return {
+        storeId: sr.storeId,
+        storeName: sr.storeName,
+        storeChain: sr.storeChain,
+        totalCost: Math.round(sr.totalCost * 100) / 100,
+        distanceKm,
+        travelPenalty: Math.round(adjustedTravelPenalty * 100) / 100,
+        missingPenalty: Math.round(missingPenalty * 100) / 100,
+        smartScore: Math.round(smartScore * 100) / 100,
+        matchedCount: sr.matchedCount,
+        totalItems: items.length,
+      };
+    });
+
+    result.smartRecommendation.sort((a, b) => a.smartScore - b.smartScore);
+  }
+
+  return result;
 }
 
 /**
@@ -153,19 +232,20 @@ async function findBestMatch(
   itemName: string,
   language: string
 ): Promise<StoreMatch | null> {
-  const normalized = normalizeForSearch(itemName);
-  const searchField = language === "en" ? "nameEn" : "nameLt";
-
-  // Search with LIKE for the main term
+  const normalized = normalizeText(itemName);
   const words = normalized.split(/\s+/).filter((w) => w.length > 2);
   if (words.length === 0) return null;
 
-  // Build a search: all words must appear somewhere in the name
+  // Use searchIndex (diacritics-normalized) + name fields for matching
   const products = await prisma.product.findMany({
     where: {
       storeId,
       AND: words.map((word) => ({
-        [searchField]: { contains: word },
+        OR: [
+          { searchIndex: { contains: word } },
+          { nameLt: { contains: word } },
+          { nameEn: { contains: word } },
+        ],
       })),
     },
     include: {
@@ -182,7 +262,11 @@ async function findBestMatch(
     const fallback = await prisma.product.findMany({
       where: {
         storeId,
-        [searchField]: { contains: words[0] },
+        OR: [
+          { searchIndex: { contains: words[0] } },
+          { nameLt: { contains: words[0] } },
+          { nameEn: { contains: words[0] } },
+        ],
       },
       include: {
         priceRecords: {
@@ -195,7 +279,6 @@ async function findBestMatch(
 
     if (fallback.length === 0) return null;
 
-    // Pick the one with best name similarity
     const best = fallback[0];
     const pr = best.priceRecords[0];
     if (!pr) return null;
@@ -212,9 +295,9 @@ async function findBestMatch(
 
   // Pick the product whose name is closest to the search term
   const scored = products.map((p) => {
-    const name = (
+    const name = normalizeText(
       language === "en" ? p.nameEn || p.nameLt : p.nameLt
-    ).toLowerCase();
+    );
     const similarity = calculateSimilarity(normalized, name);
     return { product: p, similarity };
   });
@@ -233,16 +316,6 @@ async function findBestMatch(
     salePrice: pr.salePrice ?? undefined,
     loyaltyPrice: pr.loyaltyPrice ?? undefined,
   };
-}
-
-function normalizeForSearch(text: string): string {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // Remove diacritics
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function calculateSimilarity(a: string, b: string): number {

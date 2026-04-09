@@ -4,7 +4,6 @@ import { ReactNode } from "react";
 import { ThemeProvider } from "./theme-provider";
 import { I18nProvider } from "./i18n-provider";
 import { Sidebar, BottomNav } from "./navigation";
-import { ThemeSwitcher } from "./theme-switcher";
 import { LanguageSwitcher } from "./language-switcher";
 
 export function ClientProviders({ children }: { children: ReactNode }) {
@@ -21,7 +20,6 @@ export function ClientProviders({ children }: { children: ReactNode }) {
               </div>
               <div className="flex items-center gap-2 ml-auto">
                 <LanguageSwitcher />
-                <ThemeSwitcher />
               </div>
             </header>
 

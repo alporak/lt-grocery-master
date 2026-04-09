@@ -65,6 +65,7 @@ export default function StoresPage() {
 
   const chainColor: Record<string, string> = {
     IKI: "border-red-500",
+    MAXIMA: "border-orange-500",
     BARBORA: "border-orange-500",
     RIMI: "border-blue-500",
     PROMO: "border-purple-500",
@@ -133,7 +134,7 @@ export default function StoresPage() {
               <CardContent>
                 {store.locations.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
-                    {store.chain === "BARBORA"
+                    {store.chain === "BARBORA" || store.chain === "MAXIMA"
                       ? t("stores.deliveryOnly")
                       : "No location data available"}
                   </p>

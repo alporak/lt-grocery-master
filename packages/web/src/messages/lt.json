@@ -24,6 +24,7 @@
     "products": "Produktai",
     "groceryLists": "Pirkinių sąrašai",
     "stores": "Parduotuvės",
+    "scraper": "Nuskaitytuvas",
     "settings": "Nustatymai"
   },
   "dashboard": {
@@ -64,7 +65,10 @@
     "threeMonths": "3 mėnesiai",
     "sixMonths": "6 mėnesiai",
     "year": "Metai",
-    "compareAcrossStores": "Palyginti tarp parduotuvių"
+    "compareAcrossStores": "Palyginti tarp parduotuvių",
+    "resultsFound": "produktų rasta",
+    "addToList": "Pridėti į sąrašą",
+    "added": "Pridėta!"
   },
   "groceryLists": {
     "title": "Pirkinių sąrašai",
@@ -93,7 +97,10 @@
     "singleStore": "Viena parduotuvė",
     "notFound": "Nerasta",
     "bestPrice": "Geriausia kaina",
-    "vsAverage": "Lyginant su vidurkiu"
+    "vsAverage": "Lyginant su vidurkiu",
+    "smartPick": "Protingas",
+    "smartDescription": "Atsižvelgia į maisto kainą, ėjimo atstumą ir trūkstamas prekes, kad rastų geriausią parduotuvę.",
+    "bestChoice": "Geriausias pasirinkimas"
   },
   "stores": {
     "title": "Parduotuvės",
@@ -125,11 +132,35 @@
     "days": "dienų",
     "scrapeNow": "Nuskaityti dabar",
     "scraping": "Nuskaitoma...",
-    "saved": "Nustatymai išsaugoti"
+    "saved": "Nustatymai išsaugoti",
+    "importLocations": "Importuoti parduotuvių vietas iš interneto",
+    "importingLocations": "Importuojamos parduotuvių vietos..."
   },
   "theme": {
     "light": "Šviesi",
     "dark": "Tamsi",
-    "saltibarscia": "Šaltibarščiai 🩷"
+    "saltibarscia": "Šaltibarščiai 🩷"  },
+  "scraper": {
+    "title": "Nuskaitytuvas",
+    "description": "Nurodykite CSS selektorius, kad nuskaitytumėte produktų duomenis iš bet kurios e-parduotuvės. Pirmiausia išbandykite, tada paleiskite importavimą.",
+    "newConfig": "Naujas nuskaitytuvas",
+    "configName": "Konfigūracijos pavadinimas",
+    "storeName": "Parduotuvės pavadinimas",
+    "url": "Svetainės URL (pvz. https://shop.example.com/products)",
+    "selectors": "CSS Selektoriai",
+    "container": "Konteineris",
+    "productName": "Pavadinimas",
+    "price": "Kaina",
+    "link": "Nuoroda",
+    "image": "Nuotrauka",
+    "category": "Kategorija",
+    "pagination": "Kitas puslapis",
+    "test": "Testuoti",
+    "run": "Paleisti",
+    "noConfigs": "Nėra nuskaitytuvų konfigūracijų. Sukurkite naują, kad pradėtumėte nuskaityti.",
+    "visualBuilder": "Vizualinis kūrėjas",
+    "visualDescription": "Spauskite ant elementų bet kurioje svetainėje, kad nurodytumėte produktų duomenis. CSS žinių nereikia.",
+    "existingConfigs": "Išsaugoti nuskaitytuvai",
+    "createConfig": "Sukurti nuskaitytuvo konfigūraciją"
   }
 }

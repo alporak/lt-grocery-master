@@ -50,9 +50,10 @@ model Product {
   weightUnit  String?
   imageUrl    String?
   productUrl  String?
-  barcode     String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  barcode      String?
+  searchIndex  String?   // normalized lowercase no-diacritics name for search
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   store        Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
   priceRecords PriceRecord[]
@@ -61,6 +62,7 @@ model Product {
   @@index([nameLt])
   @@index([categoryLt])
   @@index([storeId])
+  @@index([searchIndex])
 }
 
 model PriceRecord {
@@ -120,4 +122,24 @@ model ScrapeLog {
 
   @@index([storeId])
   @@index([startedAt])
+}
+
+model ScraperConfig {
+  id            Int      @id @default(autoincrement())
+  name          String
+  url           String
+  storeName     String   // User-defined store label
+  chain         String   @default("CUSTOM")
+  containerSel  String   // CSS selector for each product container
+  nameSel       String   // CSS selector for product name (relative to container)
+  priceSel      String   // CSS selector for product price (relative to container)
+  linkSel       String?  // CSS selector for product link
+  imageSel      String?  // CSS selector for product image
+  categorySel   String?  // CSS selector for product category
+  paginationSel String?  // CSS selector for next page link
+  enabled       Boolean  @default(true)
+  lastRunAt     DateTime?
+  lastRunCount  Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }

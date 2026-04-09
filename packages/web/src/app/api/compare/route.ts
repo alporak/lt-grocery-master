@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { compareGroceryList } from "@/lib/compare";
+import { getSettings } from "@/lib/settings";
+import { geocodeAddress } from "@/lib/distance";
 
 export const dynamic = "force-dynamic";
+
+let geoCache: { address: string; lat: number; lng: number } | null = null;
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -15,6 +19,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const result = await compareGroceryList(items, language);
+  // Resolve user location from settings
+  let userLat: number | undefined;
+  let userLng: number | undefined;
+  try {
+    const settings = await getSettings();
+    const address = settings.address as string | undefined;
+    if (address && address.length > 3) {
+      if (geoCache && geoCache.address === address) {
+        userLat = geoCache.lat;
+        userLng = geoCache.lng;
+      } else {
+        const coords = await geocodeAddress(`${address}, Lithuania`);
+        if (coords) {
+          userLat = coords.lat;
+          userLng = coords.lng;
+          geoCache = { address, lat: coords.lat, lng: coords.lng };
+        }
+      }
+    }
+  } catch { /* settings or geocode failure, continue without location */ }
+
+  const result = await compareGroceryList(items, language, userLat, userLng);
   return NextResponse.json(result);
 }

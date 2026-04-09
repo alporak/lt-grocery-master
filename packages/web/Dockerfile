@@ -26,7 +26,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs && \
-    apk add --no-cache su-exec
+    apk add --no-cache su-exec sqlite
 
 # Copy standalone output
 COPY --from=builder /app/packages/web/.next/standalone ./

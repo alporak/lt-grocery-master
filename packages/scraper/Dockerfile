@@ -19,4 +19,8 @@ RUN npx prisma generate
 # Create data directory
 RUN mkdir -p /app/data
 
-CMD ["npm", "start"]
+# Copy entrypoint
+COPY packages/scraper/docker-entrypoint.sh /app/packages/scraper/docker-entrypoint.sh
+RUN chmod +x /app/packages/scraper/docker-entrypoint.sh
+
+ENTRYPOINT ["/app/packages/scraper/docker-entrypoint.sh"]

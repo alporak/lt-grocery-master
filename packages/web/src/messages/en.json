@@ -24,6 +24,7 @@
     "products": "Products",
     "groceryLists": "Grocery Lists",
     "stores": "Stores",
+    "scraper": "Web Scraper",
     "settings": "Settings"
   },
   "dashboard": {
@@ -64,7 +65,10 @@
     "threeMonths": "3 Months",
     "sixMonths": "6 Months",
     "year": "Year",
-    "compareAcrossStores": "Compare Across Stores"
+    "compareAcrossStores": "Compare Across Stores",
+    "resultsFound": "products found",
+    "addToList": "Add to list",
+    "added": "Added!"
   },
   "groceryLists": {
     "title": "Grocery Lists",
@@ -93,7 +97,10 @@
     "singleStore": "Single store",
     "notFound": "Not found",
     "bestPrice": "Best Price",
-    "vsAverage": "vs. average"
+    "vsAverage": "vs. average",
+    "smartPick": "Smart",
+    "smartDescription": "Factors in grocery cost, walking distance, and missing items to find the best overall store.",
+    "bestChoice": "Best choice"
   },
   "stores": {
     "title": "Stores",
@@ -125,11 +132,35 @@
     "days": "days",
     "scrapeNow": "Scrape Now",
     "scraping": "Scraping...",
-    "saved": "Settings saved"
+    "saved": "Settings saved",
+    "importLocations": "Import store locations from web",
+    "importingLocations": "Importing store locations..."
   },
   "theme": {
     "light": "Light",
     "dark": "Dark",
-    "saltibarscia": "Šaltibarščiai 🩷"
+    "saltibarscia": "Šaltibarščiai 🩷"  },
+  "scraper": {
+    "title": "Web Scraper",
+    "description": "Define CSS selectors to scrape product data from any e-shop website. Test your selectors first, then run to import products.",
+    "newConfig": "New Scraper",
+    "configName": "Config name",
+    "storeName": "Store name",
+    "url": "Website URL (e.g. https://shop.example.com/products)",
+    "selectors": "CSS Selectors",
+    "container": "Container",
+    "productName": "Name",
+    "price": "Price",
+    "link": "Link",
+    "image": "Image",
+    "category": "Category",
+    "pagination": "Next page",
+    "test": "Test",
+    "run": "Run",
+    "noConfigs": "No scraper configs yet. Create one to start scraping any website.",
+    "visualBuilder": "Visual Builder",
+    "visualDescription": "Point-and-click to select product elements from any website. No CSS knowledge needed.",
+    "existingConfigs": "Saved Scrapers",
+    "createConfig": "Create Scraper Config"
   }
 }

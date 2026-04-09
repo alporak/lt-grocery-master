@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
-import { Save, RefreshCw, Sun, Moon, Droplets } from "lucide-react";
+import { Save, RefreshCw, Sun, Moon, Droplets, MapPin } from "lucide-react";
 
 export default function SettingsPage() {
   const { t, language, setLanguage } = useI18n();
@@ -23,6 +23,7 @@ export default function SettingsPage() {
   const [retention, setRetention] = useState("90");
   const [saved, setSaved] = useState(false);
   const [scraping, setScraping] = useState(false);
+  const [scrapingLocations, setScrapingLocations] = useState(false);
 
   useEffect(() => {
     fetch("/api/settings")
@@ -138,6 +139,21 @@ export default function SettingsPage() {
           <p className="text-xs text-muted-foreground mt-2">
             Used for calculating nearest stores. Will be geocoded automatically.
           </p>
+          <Button
+            variant="outline"
+            onClick={async () => {
+              setScrapingLocations(true);
+              try {
+                await fetch("/api/stores/scrape-locations", { method: "POST" });
+              } catch {}
+              setScrapingLocations(false);
+            }}
+            disabled={scrapingLocations}
+            className="w-full gap-2 mt-3"
+          >
+            <MapPin className={`h-4 w-4 ${scrapingLocations ? "animate-pulse" : ""}`} />
+            {scrapingLocations ? "Importing store locations..." : "Import store locations from web"}
+          </Button>
         </CardContent>
       </Card>
 

@@ -50,9 +50,10 @@ model Product {
   weightUnit  String?
   imageUrl    String?
   productUrl  String?
-  barcode     String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  barcode      String?
+  searchIndex  String?   // normalized lowercase no-diacritics name for search
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   store        Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
   priceRecords PriceRecord[]
@@ -61,6 +62,7 @@ model Product {
   @@index([nameLt])
   @@index([categoryLt])
   @@index([storeId])
+  @@index([searchIndex])
 }
 
 model PriceRecord {

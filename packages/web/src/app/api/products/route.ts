@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { buildSearchConditions, normalizeText } from "@/lib/search";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const search = searchParams.get("search") || "";
-  const storeId = searchParams.get("storeId");
+  const storeIds = searchParams.get("storeIds"); // comma-separated store IDs
+  const storeId = searchParams.get("storeId"); // legacy single store
   const category = searchParams.get("category");
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = parseInt(searchParams.get("pageSize") || "20", 10);
@@ -15,17 +17,42 @@ export async function GET(req: NextRequest) {
   const where: Record<string, unknown> = {};
 
   if (search) {
-    const field = lang === "en" ? "nameEn" : "nameLt";
-    where[field] = { contains: search };
+    const conditions = buildSearchConditions(search);
+    if (conditions.length > 0) {
+      where.OR = conditions;
+    }
   }
 
-  if (storeId) {
+  // Multi-store filter
+  if (storeIds) {
+    const ids = storeIds.split(",").map(Number).filter(Boolean);
+    if (ids.length > 0) {
+      where.storeId = { in: ids };
+    }
+  } else if (storeId) {
     where.storeId = parseInt(storeId, 10);
   }
 
   if (category) {
-    const field = lang === "en" ? "categoryEn" : "categoryLt";
-    where[field] = { contains: category };
+    const normalizedCat = normalizeText(category);
+    where.OR = [
+      ...(Array.isArray(where.OR) ? where.OR : []),
+      { categoryLt: { contains: category } },
+      { categoryEn: { contains: category } },
+    ];
+    // If there's already a search OR, we need AND with category
+    if (search && Array.isArray(where.OR)) {
+      // Restructure: search conditions AND category condition
+      const searchOr = buildSearchConditions(search);
+      delete where.OR;
+      where.AND = [
+        { OR: searchOr },
+        { OR: [
+          { categoryLt: { contains: category } },
+          { categoryEn: { contains: category } },
+        ]}
+      ];
+    }
   }
 
   const [products, total] = await Promise.all([
