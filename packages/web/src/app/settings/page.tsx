@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
-import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Globe, Trash2, Sparkles, AlertTriangle, Cpu } from "lucide-react";
+import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Globe, Trash2, AlertTriangle, Cpu, Zap, Square } from "lucide-react";
 import Link from "next/link";
 
 export default function SettingsPage() {
@@ -28,11 +28,18 @@ export default function SettingsPage() {
   const [resetting, setResetting] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetResult, setResetResult] = useState<string | null>(null);
-  const [enrichingAll, setEnrichingAll] = useState(false);
-  const [enrichConfirm, setEnrichConfirm] = useState(false);
-  const [enrichResult, setEnrichResult] = useState<string | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
   const [reprocessResult, setReprocessResult] = useState<string | null>(null);
+  const [groqKey, setGroqKey] = useState("");
+  const [bulkStatus, setBulkStatus] = useState<{
+    running: boolean;
+    total: number;
+    done: number;
+    failed: number;
+    error: string | null;
+    started_at: number | null;
+    finished_at: number | null;
+  } | null>(null);
 
   useEffect(() => {
     fetch("/api/settings")
@@ -43,7 +50,25 @@ export default function SettingsPage() {
         if (s.priceRetentionDays) setRetention(String(s.priceRetentionDays));
       })
       .catch(() => {});
+
+    // Check if bulk enrichment is already running
+    fetch("/api/bulk-enrich")
+      .then((r) => r.json())
+      .then((s) => { if (s.total > 0) setBulkStatus(s); })
+      .catch(() => {});
   }, []);
+
+  // Poll bulk enrichment status while running
+  useEffect(() => {
+    if (!bulkStatus?.running) return;
+    const interval = setInterval(() => {
+      fetch("/api/bulk-enrich")
+        .then((r) => r.json())
+        .then((s) => setBulkStatus(s))
+        .catch(() => {});
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [bulkStatus?.running]);
 
   const saveSettings = async () => {
     await fetch("/api/settings", {
@@ -298,85 +323,145 @@ export default function SettingsPage() {
               <p className="text-xs mt-1 p-2 rounded bg-muted">{reprocessResult}</p>
             )}
           </div>
+        </CardContent>
+      </Card>
 
-          {/* Enrich ALL with Ollama */}
-          <div className="border-t pt-4">
-            {!enrichConfirm ? (
-              <Button
-                variant="outline"
-                onClick={() => setEnrichConfirm(true)}
-                className="w-full gap-2"
-              >
-                <Sparkles className="h-4 w-4" />
-                {language === "lt" ? "Ollama: praturtinti VISUS produktus" : "Ollama: Enrich ALL Products"}
-              </Button>
-            ) : (
-              <div className="space-y-2 p-3 rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
-                      {language === "lt" ? "Ar tikrai?" : "Are you sure?"}
-                    </p>
-                    <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
-                      {language === "lt"
-                        ? "Tai istrins visus esamus LLM praturtinimus ir pradės iš naujo. Su ~15k produktų tai gali užtrukti kelias valandas."
-                        : "This will clear all existing LLM enrichments and re-process from scratch. With ~15k products this can take several hours."}
-                    </p>
-                  </div>
+      {/* Bulk Enrichment via Groq */}
+      <Card className="border-primary/30">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Zap className="h-5 w-5" />
+            {language === "lt" ? "Greitas praturtinimas (Groq)" : "Fast Enrichment (Groq)"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {language === "lt"
+              ? "Naudokite Groq API, kad praturtintumėte visus produktus. Galite nustatyti GROQ_API_KEY .env faile arba įvesti čia."
+              : "Use the Groq API to enrich all products. Set GROQ_API_KEY in .env or enter it below."}
+          </p>
+
+          {bulkStatus?.running ? (
+            <div className="space-y-3">
+              {/* Progress bar */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>{bulkStatus.done + bulkStatus.failed} / {bulkStatus.total}</span>
+                  <span>
+                    {bulkStatus.total > 0
+                      ? `${Math.round(((bulkStatus.done + bulkStatus.failed) / bulkStatus.total) * 100)}%`
+                      : "0%"}
+                  </span>
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={async () => {
-                      setEnrichConfirm(false);
-                      setEnrichingAll(true);
-                      setEnrichResult(null);
-                      try {
-                        const res = await fetch("/api/admin", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ action: "enrich-all" }),
-                        });
-                        const data = await res.json();
-                        setEnrichResult(
-                          data.success
-                            ? `${data.productsCleared} products queued for enrichment. Processing in batches...`
-                            : "Failed"
-                        );
-                      } catch {
-                        setEnrichResult("Failed to reach server");
-                      }
-                      setEnrichingAll(false);
+                <div className="h-3 w-full bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all duration-500"
+                    style={{
+                      width: `${bulkStatus.total > 0 ? ((bulkStatus.done + bulkStatus.failed) / bulkStatus.total) * 100 : 0}%`,
                     }}
-                    disabled={enrichingAll}
-                    className="gap-1"
-                  >
-                    <Sparkles className="h-3 w-3" />
-                    {enrichingAll
-                      ? (language === "lt" ? "Paleidžiama..." : "Starting...")
-                      : (language === "lt" ? "Taip, praturtinti visus" : "Yes, enrich all")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setEnrichConfirm(false)}
-                  >
-                    {t("common.cancel")}
-                  </Button>
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span className="text-green-600 dark:text-green-400">
+                    {bulkStatus.done} {language === "lt" ? "sėkmingai" : "enriched"}
+                  </span>
+                  {bulkStatus.failed > 0 && (
+                    <span className="text-destructive">
+                      {bulkStatus.failed} {language === "lt" ? "nepavyko" : "failed"}
+                    </span>
+                  )}
+                  {bulkStatus.started_at && (
+                    <span>
+                      {(() => {
+                        const elapsed = Math.floor((Date.now() / 1000) - bulkStatus.started_at);
+                        const remaining = bulkStatus.done > 0
+                          ? Math.floor((elapsed / (bulkStatus.done + bulkStatus.failed)) * (bulkStatus.total - bulkStatus.done - bulkStatus.failed))
+                          : 0;
+                        const mins = Math.floor(remaining / 60);
+                        return remaining > 0 ? `~${mins}m left` : "";
+                      })()}
+                    </span>
+                  )}
                 </div>
               </div>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">
-              {language === "lt"
-                ? "Reikia veikiančio Ollama serviso (docker compose --profile full)."
-                : "Requires Ollama service running (docker compose --profile full)."}
-            </p>
-            {enrichResult && (
-              <p className="text-xs mt-1 p-2 rounded bg-muted">{enrichResult}</p>
-            )}
-          </div>
+              {bulkStatus.error && (
+                <p className="text-xs text-destructive p-2 rounded bg-destructive/10">
+                  {bulkStatus.error}
+                </p>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  await fetch("/api/bulk-enrich", { method: "DELETE" });
+                  const res = await fetch("/api/bulk-enrich");
+                  setBulkStatus(await res.json());
+                }}
+                className="gap-2"
+              >
+                <Square className="h-3 w-3" />
+                {language === "lt" ? "Sustabdyti" : "Stop"}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {bulkStatus && !bulkStatus.running && bulkStatus.done > 0 && (
+                <p className="text-xs p-2 rounded bg-muted">
+                  {language === "lt" ? "Paskutinis paleidimas" : "Last run"}:{" "}
+                  {bulkStatus.done} {language === "lt" ? "praturtinta" : "enriched"}, {bulkStatus.failed} {language === "lt" ? "nepavyko" : "failed"}
+                  {bulkStatus.error && ` — ${bulkStatus.error}`}
+                </p>
+              )}
+              <div>
+                <label className="text-xs font-medium mb-1 block">
+                  Groq API Key{" "}
+                  <span className="text-muted-foreground font-normal">
+                    ({language === "lt" ? "nebūtina, jei nustatyta .env" : "optional if set in .env"})
+                  </span>{" "}
+                  <a
+                    href="https://console.groq.com/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary underline"
+                  >
+                    ({language === "lt" ? "gauti nemokamai" : "get free"})
+                  </a>
+                </label>
+                <Input
+                  type="password"
+                  placeholder="gsk_..."
+                  value={groqKey}
+                  onChange={(e) => setGroqKey(e.target.value)}
+                />
+              </div>
+              <Button
+                onClick={async () => {
+                  try {
+                    const body: Record<string, string> = {};
+                    if (groqKey) body.api_key = groqKey;
+                    const res = await fetch("/api/bulk-enrich", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(body),
+                    });
+                    const data = await res.json();
+                    if (data.error) {
+                      setBulkStatus({ running: false, total: 0, done: 0, failed: 0, error: data.error, started_at: null, finished_at: null });
+                    } else {
+                      setBulkStatus({ running: true, total: data.total, done: 0, failed: 0, error: null, started_at: Date.now() / 1000, finished_at: null });
+                    }
+                    setGroqKey("");
+                  } catch {
+                    setBulkStatus({ running: false, total: 0, done: 0, failed: 0, error: "Failed to reach embedder", started_at: null, finished_at: null });
+                  }
+                }}
+                className="w-full gap-2"
+              >
+                <Zap className="h-4 w-4" />
+                {language === "lt" ? "Pradėti praturtinimą" : "Start Enrichment"}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 

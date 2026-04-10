@@ -44,17 +44,19 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "enrich-all") {
-    // Clear enrichedAt on all products so Ollama re-processes everything
+    // Clear enrichedAt on all products so they get re-enriched
     const updated = await prisma.product.updateMany({
       data: { enrichment: null, enrichedAt: null },
     });
 
-    // Trigger the embedder to start enrichment
+    // Trigger the bulk-enrich background worker (uses GROQ_API_KEY from env)
     const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
     let enrichResult = null;
     try {
-      const res = await fetch(`${embedderUrl}/enrich`, {
+      const res = await fetch(`${embedderUrl}/bulk-enrich`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
         signal: AbortSignal.timeout(10000),
       });
       if (res.ok) {

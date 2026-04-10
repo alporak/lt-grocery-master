@@ -6,14 +6,14 @@ Endpoints:
   POST /embed-batch   — generate embeddings for product texts
   POST /search        — semantic search: query → ranked product IDs
   POST /categorize    — assign canonical categories to products
-  POST /enrich        — LLM-enrich new products via Ollama
+  POST /enrich        — LLM-enrich new products via Groq
   POST /process       — full pipeline: embed → categorize → enrich → export
   POST /export        — export product-intelligence.json.gz
   POST /import        — import from product-intelligence artifact
   GET  /health        — readiness check
 """
 
-import json, gzip, base64, os, time, sqlite3, logging
+import json, gzip, base64, os, time, sqlite3, logging, asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -31,11 +31,13 @@ MODEL_NAME = os.getenv("MODEL_NAME", "sentence-transformers/paraphrase-multiling
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DB_PATH = DATA_DIR / "grocery.db"
 EMBEDDINGS_DIR = DATA_DIR / "embeddings"
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_BATCH_SIZE = int(os.getenv("GROQ_BATCH_SIZE", "10"))
+GROQ_REQUEST_INTERVAL = 1.0  # seconds between API calls
 CATEGORIES_PATH = Path(__file__).parent / "categories.json"
 EXPORT_PATH = DATA_DIR / "product-intelligence.json.gz"
-ENRICH_BATCH_SIZE = int(os.getenv("ENRICH_BATCH_SIZE", "500"))
 
 # --- Global state ---
 model = None  # SentenceTransformer, loaded at startup
@@ -255,59 +257,91 @@ def categorize(req: CategorizeRequest):
 
 @app.post("/enrich")
 async def enrich():
-    """LLM-enrich products that have no enrichedAt timestamp, via Ollama."""
+    """LLM-enrich products that have no enrichedAt timestamp, via Groq."""
+    if not GROQ_API_KEY:
+        return {"enriched": 0, "message": "GROQ_API_KEY not set", "skipped": True}
+
     conn = get_db_rw()
     try:
         rows = conn.execute(
-            "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL LIMIT ?",
-            (ENRICH_BATCH_SIZE,)
+            "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL LIMIT 500"
         ).fetchall()
 
         if not rows:
             return {"enriched": 0, "message": "No products to enrich"}
 
-        log.info(f"[Enrich] Enriching {len(rows)} products via Ollama ({OLLAMA_MODEL})...")
+        log.info(f"[Enrich] Enriching {len(rows)} products via Groq ({GROQ_MODEL}), batch_size={GROQ_BATCH_SIZE}...")
         enriched_count = 0
+        failed_count = 0
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            for row in rows:
-                product_text = _build_product_text(row)
-                prompt = _build_enrich_prompt(product_text)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for batch_start in range(0, len(rows), GROQ_BATCH_SIZE):
+                batch = rows[batch_start:batch_start + GROQ_BATCH_SIZE]
+
+                product_lines = []
+                for i, row in enumerate(batch):
+                    product_lines.append(f"Product {i+1}: {_build_product_text(row)}")
+                batch_prompt = "\n".join(product_lines)
 
                 try:
-                    resp = await client.post(f"{OLLAMA_URL}/api/generate", json={
-                        "model": OLLAMA_MODEL,
-                        "prompt": prompt,
-                        "stream": False,
-                        "format": ENRICH_SCHEMA,
-                        "options": {"temperature": 0.1, "num_predict": 300},
+                    resp = await client.post(GROQ_URL, json={
+                        "model": GROQ_MODEL,
+                        "messages": [
+                            {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
+                            {"role": "user", "content": batch_prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 4000,
+                        "response_format": {"type": "json_object"},
+                    }, headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
                     })
+
+                    if resp.status_code == 429:
+                        retry_after = float(resp.headers.get("retry-after", "10")) + 2
+                        log.warning(f"[Enrich] Rate limited, waiting {retry_after}s")
+                        await asyncio.sleep(retry_after)
+                        failed_count += len(batch)
+                        continue
+
                     if resp.status_code != 200:
-                        log.warning(f"[Enrich] Ollama returned {resp.status_code} for product {row['id']}")
+                        log.warning(f"[Enrich] Groq returned {resp.status_code}")
+                        failed_count += len(batch)
                         continue
 
                     result = resp.json()
-                    response_text = result.get("response", "")
-                    enrichment = _parse_enrichment(response_text)
+                    content = result["choices"][0]["message"]["content"]
+                    data = json.loads(content)
 
-                    if enrichment:
-                        conn.execute(
-                            "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
-                            (json.dumps(enrichment), row["id"])
-                        )
-                        enriched_count += 1
+                    items = data.get("results") if isinstance(data, dict) else data
+                    if not isinstance(items, list):
+                        items = [data] if isinstance(data, dict) and "name_clean" in data else []
+
+                    for i, row in enumerate(batch):
+                        if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
+                            conn.execute(
+                                "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
+                                (json.dumps(items[i]), row["id"])
+                            )
+                            enriched_count += 1
+                        else:
+                            failed_count += 1
+
+                    conn.commit()
+
                 except Exception as e:
-                    log.warning(f"[Enrich] Error enriching product {row['id']}: {e}")
-                    continue
+                    log.warning(f"[Enrich] Error on batch: {e}")
+                    failed_count += len(batch)
 
-        conn.commit()
-        log.info(f"[Enrich] Enriched {enriched_count}/{len(rows)} products")
+                await asyncio.sleep(GROQ_REQUEST_INTERVAL)
 
-        # Re-embed enriched products to include LLM tags
+        log.info(f"[Enrich] Enriched {enriched_count}/{len(rows)} products ({failed_count} failed)")
+
         if enriched_count > 0:
             _reembed_enriched(conn, enriched_count)
 
-        return {"enriched": enriched_count, "total_pending": len(rows)}
+        return {"enriched": enriched_count, "failed": failed_count, "total_pending": len(rows)}
     finally:
         conn.close()
 
@@ -323,17 +357,12 @@ async def process():
     # Step 2: Categorize uncategorized products
     results["categorize"] = _categorize_new_products()
 
-    # Step 3: LLM enrichment (if Ollama is available)
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            health = await client.get(f"{OLLAMA_URL}/api/tags")
-            if health.status_code == 200:
-                enrich_result = await enrich()
-                results["enrich"] = enrich_result
-            else:
-                results["enrich"] = {"skipped": True, "reason": "Ollama not healthy"}
-    except Exception:
-        results["enrich"] = {"skipped": True, "reason": "Ollama not available"}
+    # Step 3: LLM enrichment via Groq (if API key is configured)
+    if GROQ_API_KEY:
+        enrich_result = await enrich()
+        results["enrich"] = enrich_result
+    else:
+        results["enrich"] = {"skipped": True, "reason": "GROQ_API_KEY not set"}
 
     # Step 4: Export
     results["export"] = _do_export()
@@ -351,6 +380,219 @@ def import_data():
     return _do_import()
 
 
+# --- Bulk enrichment via Groq API ---
+# Runs as a background task so it survives client disconnects
+
+_bulk_enrich_state = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "failed": 0,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
+
+BULK_ENRICH_SYSTEM_PROMPT = """You classify Lithuanian grocery products. For EACH product, return a JSON object.
+When given multiple products, return a JSON object with a "results" array containing one object per product, in the same order.
+
+Each object must have:
+- name_clean: English product name with brand and size
+- is_food: boolean (false for cleaning, pet food, hygiene, paper products)
+- primary_category: broad English category (Dairy, Poultry, Beverages, Snacks, Cleaning Products, etc.)
+- tags_en: 4-7 English search words a shopper would use
+- tags_lt: 4-7 Lithuanian search words a shopper would use
+- attributes: object with filterable properties like type, flavor, scent, packaging
+
+Example for a single product:
+Product 1: Rokiškio pienas 2.5% riebumo, 1L | Rokiškio milk 2.5% fat, 1L | Pieno produktai | Rokiškio
+
+{"results":[{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{"type":"fresh","packaging":"carton"}}]}"""
+
+
+async def _bulk_enrich_worker(api_key: str, model: str):
+    """Background worker that enriches all un-enriched products via Groq in batches."""
+    global _bulk_enrich_state
+    state = _bulk_enrich_state
+
+    conn = get_db_rw()
+
+    try:
+        total = conn.execute("SELECT count(*) FROM Product WHERE enrichedAt IS NULL").fetchone()[0]
+        state["total"] = total
+        log.info(f"[BulkEnrich] Starting: {total} products pending, batch_size={GROQ_BATCH_SIZE}")
+
+        if total == 0:
+            state["running"] = False
+            state["finished_at"] = time.time()
+            conn.close()
+            return
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            while state["running"]:
+                rows = conn.execute(
+                    "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL LIMIT ?",
+                    (GROQ_BATCH_SIZE,)
+                ).fetchall()
+
+                if not rows:
+                    break
+
+                # Build batched prompt
+                product_lines = []
+                for i, row in enumerate(rows):
+                    product_lines.append(f"Product {i+1}: {_build_product_text(row)}")
+                batch_prompt = "\n".join(product_lines)
+
+                try:
+                    resp = await client.post(GROQ_URL, json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
+                            {"role": "user", "content": batch_prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 4000,
+                        "response_format": {"type": "json_object"},
+                    }, headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    })
+
+                    if resp.status_code == 429:
+                        retry_after = float(resp.headers.get("retry-after", "10")) + 2
+                        log.warning(f"[BulkEnrich] Rate limited, waiting {retry_after}s")
+                        await asyncio.sleep(retry_after)
+                        continue  # retry same batch
+
+                    if resp.status_code == 401:
+                        state["error"] = "Invalid API key"
+                        state["running"] = False
+                        break
+
+                    if resp.status_code == 413:
+                        # Payload too large — mark batch as failed and continue
+                        log.warning(f"[BulkEnrich] 413 Payload Too Large for {len(rows)} products, marking as failed")
+                        for row in rows:
+                            conn.execute(
+                                "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
+                                (row["id"],)
+                            )
+                        conn.commit()
+                        state["failed"] += len(rows)
+                        await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+                        continue
+
+                    if resp.status_code != 200:
+                        log.warning(f"[BulkEnrich] Groq returned {resp.status_code}")
+                        state["failed"] += len(rows)
+                        for row in rows:
+                            conn.execute(
+                                "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
+                                (row["id"],)
+                            )
+                        conn.commit()
+                        await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+                        continue
+
+                    result = resp.json()
+                    content = result["choices"][0]["message"]["content"]
+                    data = json.loads(content)
+
+                    # Handle both {"results": [...]} and direct array
+                    items = data.get("results") if isinstance(data, dict) else data
+                    if not isinstance(items, list):
+                        items = [data] if isinstance(data, dict) and "name_clean" in data else []
+
+                    for i, row in enumerate(rows):
+                        if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
+                            conn.execute(
+                                "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
+                                (json.dumps(items[i]), row["id"])
+                            )
+                            state["done"] += 1
+                        else:
+                            state["failed"] += 1
+
+                    conn.commit()
+                    log.info(f"[BulkEnrich] Progress: {state['done']}/{state['total']} done, {state['failed']} failed")
+
+                except Exception as e:
+                    log.warning(f"[BulkEnrich] Error on batch: {e}")
+                    state["failed"] += len(rows)
+                    for row in rows:
+                        conn.execute(
+                            "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
+                            (row["id"],)
+                        )
+                    conn.commit()
+
+                # 1 request per second
+                await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+
+    except Exception as e:
+        state["error"] = str(e)
+        log.error(f"[BulkEnrich] Fatal error: {e}")
+    finally:
+        conn.commit()
+        conn.close()
+        state["running"] = False
+        state["finished_at"] = time.time()
+        log.info(f"[BulkEnrich] Finished: {state['done']} done, {state['failed']} failed")
+
+
+class BulkEnrichRequest(BaseModel):
+    api_key: str = ""
+    model: str = "llama-3.1-8b-instant"
+
+
+@app.post("/bulk-enrich")
+async def bulk_enrich(req: BulkEnrichRequest):
+    """Start bulk enrichment via Groq API. Runs in the background."""
+    global _bulk_enrich_state
+    if _bulk_enrich_state["running"]:
+        return {"error": "Bulk enrichment already running"}, 409
+
+    # Use provided key or fall back to env var
+    api_key = req.api_key or GROQ_API_KEY
+    if not api_key:
+        return {"error": "No API key provided and GROQ_API_KEY not set"}
+
+    # Count pending
+    conn = get_db()
+    total = conn.execute("SELECT count(*) FROM Product WHERE enrichedAt IS NULL").fetchone()[0]
+    conn.close()
+
+    _bulk_enrich_state = {
+        "running": True,
+        "total": total,
+        "done": 0,
+        "failed": 0,
+        "error": None,
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+
+    asyncio.create_task(_bulk_enrich_worker(api_key, req.model))
+    return {"started": True, "total": total}
+
+
+@app.post("/bulk-enrich/stop")
+async def bulk_enrich_stop():
+    """Stop the running bulk enrichment."""
+    global _bulk_enrich_state
+    if _bulk_enrich_state["running"]:
+        _bulk_enrich_state["running"] = False
+        return {"stopped": True}
+    return {"stopped": False, "message": "Not running"}
+
+
+@app.get("/bulk-enrich/status")
+async def bulk_enrich_status():
+    """Get bulk enrichment progress."""
+    return _bulk_enrich_state
+
+
 # --- Internal helpers ---
 
 def _build_product_text(row) -> str:
@@ -362,62 +604,6 @@ def _build_product_text(row) -> str:
     if row["brand"]:
         parts.append(row["brand"])
     return " | ".join(parts)
-
-
-# JSON schema for Ollama structured outputs — guarantees valid JSON matching this shape
-ENRICH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name_clean": {"type": "string"},
-        "is_food": {"type": "boolean"},
-        "primary_category": {"type": "string"},
-        "tags_en": {"type": "array", "items": {"type": "string"}},
-        "tags_lt": {"type": "array", "items": {"type": "string"}},
-        "attributes": {"type": "object"},
-    },
-    "required": ["name_clean", "is_food", "primary_category", "tags_en", "tags_lt"],
-}
-
-
-def _build_enrich_prompt(product_text: str) -> str:
-    return f"""You classify Lithuanian grocery products. Return a JSON object for this product.
-
-Examples:
-
-Product: Rokiškio pienas 2.5% riebumo, 1L | Rokiškio milk 2.5% fat, 1L | Pieno produktai | Rokiškio
-Result: {{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{{"type":"fresh","packaging":"carton"}}}}
-
-Product: Fairy indų ploviklis Lemon 900ml | Fairy dish soap Lemon 900ml | Valymo priemonės
-Result: {{"name_clean":"Fairy Dish Soap Lemon 900ml","is_food":false,"primary_category":"Cleaning Products","tags_en":["dish soap","dishwashing","cleaning","fairy","lemon"],"tags_lt":["indų ploviklis","valymo priemonė","fairy","citrinos kvapas"],"attributes":{{"type":"liquid","scent":"lemon"}}}}
-
-Product: Karūna šokoladinis batonėlis su karamele 40g | Karūna chocolate bar with caramel 40g | Saldumynai | Karūna
-Result: {{"name_clean":"Karūna Chocolate Bar with Caramel 40g","is_food":true,"primary_category":"Sweets & Chocolate","tags_en":["chocolate","candy bar","caramel","sweet","snack","karūna"],"tags_lt":["šokoladas","batonėlis","karamelė","saldainiai","karūna","užkandis"],"attributes":{{"type":"confectionery","flavor":"caramel"}}}}
-
-Product: Pedigree šunims su jautiena 400g | Pedigree dog food with beef 400g | Gyvūnų maistas | Pedigree
-Result: {{"name_clean":"Pedigree Dog Food with Beef 400g","is_food":false,"primary_category":"Pet Food","tags_en":["dog food","pet food","pedigree","beef","dog"],"tags_lt":["šunų maistas","gyvūnų maistas","pedigree","jautiena","šuo"],"attributes":{{"type":"wet","protein":"beef"}}}}
-
-Rules:
-- name_clean: English product name with brand and size
-- is_food: false for cleaning, pet food, hygiene, paper products
-- primary_category: broad English category (Dairy, Poultry, Beverages, Snacks, Cleaning Products, etc.)
-- tags_en: 4-7 English search words a shopper would use
-- tags_lt: 4-7 Lithuanian search words a shopper would use
-- attributes: filterable properties like type, flavor, scent, packaging
-
-Product: {product_text}
-Result:"""
-
-
-def _parse_enrichment(text: str) -> Optional[dict]:
-    """Parse LLM response. With format schema, Ollama guarantees valid JSON."""
-    text = text.strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict) and "name_clean" in data:
-            return data
-    except json.JSONDecodeError:
-        log.warning(f"[Enrich] Failed to parse response: {text[:200]}")
-    return None
 
 
 def _embed_new_products() -> dict:
