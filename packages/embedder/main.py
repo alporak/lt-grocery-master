@@ -144,6 +144,11 @@ class CategorizeRequest(BaseModel):
     ids: list[int]
     texts: list[str]
 
+class TranslateBatchRequest(BaseModel):
+    texts: list[str]
+    source: str = "lt"
+    target: str = "en"
+
 
 # --- Endpoints ---
 
@@ -253,6 +258,100 @@ def categorize(req: CategorizeRequest):
             "score": round(float(similarities[i, cat_idx]), 4),
         })
     return {"results": results}
+
+
+TRANSLATE_SYSTEM_PROMPT = """You are an expert Lithuanian-to-English translator for grocery products.
+Translate the given Lithuanian grocery product names to English accurately.
+IMPORTANT rules:
+- Keep brand names exactly as-is (e.g. "IKI MĖSA" stays "IKI MĖSA", "Rokiškio" stays "Rokiškio")
+- Translate product descriptions accurately (blauzdelės = drumsticks, NOT legs)
+- Keep weights, volumes, and units as-is (500 g, 1L, etc.)
+- Keep numbers and percentages as-is
+- Do NOT translate store names like IKI, RIMI, Barbora, Maxima — keep them as-is
+- If a word is already in English, keep it
+- Return ONLY a JSON object with a "translations" array of strings, one per input product, in the same order
+- Each translation should be a clean, natural English product name"""
+
+
+@app.post("/translate-batch")
+async def translate_batch(req: TranslateBatchRequest):
+    """Translate product names using LLM for high-quality grocery translations."""
+    if not GROQ_API_KEY:
+        raise HTTPException(503, "GROQ_API_KEY not set — LLM translation unavailable")
+
+    if len(req.texts) == 0:
+        return {"translations": []}
+
+    # Process in chunks of 30 to stay within token limits
+    chunk_size = 30
+    all_translations: list[str] = []
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for chunk_start in range(0, len(req.texts), chunk_size):
+            chunk = req.texts[chunk_start:chunk_start + chunk_size]
+
+            numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(chunk))
+            user_prompt = f"Translate these {len(chunk)} Lithuanian grocery product names to English:\n\n{numbered}"
+
+            try:
+                resp = await client.post(GROQ_URL, json={
+                    "model": GROQ_MODEL,
+                    "messages": [
+                        {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 4000,
+                    "response_format": {"type": "json_object"},
+                }, headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                })
+
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("retry-after", "5")) + 1
+                    log.warning(f"[Translate] Rate limited, waiting {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    # Retry this chunk
+                    resp = await client.post(GROQ_URL, json={
+                        "model": GROQ_MODEL,
+                        "messages": [
+                            {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 4000,
+                        "response_format": {"type": "json_object"},
+                    }, headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    })
+
+                if resp.status_code != 200:
+                    log.warning(f"[Translate] Groq returned {resp.status_code}, falling back to originals for chunk")
+                    all_translations.extend(chunk)
+                    continue
+
+                result = resp.json()
+                content = result["choices"][0]["message"]["content"]
+                data = json.loads(content)
+
+                translations = data.get("translations", [])
+                if not isinstance(translations, list) or len(translations) != len(chunk):
+                    log.warning(f"[Translate] Unexpected LLM response shape (got {len(translations) if isinstance(translations, list) else 'non-list'}, expected {len(chunk)}), falling back")
+                    all_translations.extend(chunk)
+                    continue
+
+                all_translations.extend(translations)
+
+            except Exception as e:
+                log.warning(f"[Translate] Error on chunk: {e}")
+                all_translations.extend(chunk)  # fallback to originals
+
+            if chunk_start + chunk_size < len(req.texts):
+                await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+
+    return {"translations": all_translations}
 
 
 @app.post("/enrich")

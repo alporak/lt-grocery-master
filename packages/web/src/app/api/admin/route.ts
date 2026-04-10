@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { translateBatch } from "@/lib/translate";
 
 export const dynamic = "force-dynamic";
 
@@ -271,5 +272,204 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  if (action === "run-phases") {
+    const phases: string[] = body.phases || [];
+    const validPhases = ["translate", "retranslate", "enrich", "reprocess"];
+    const selected = phases.filter((p: string) => validPhases.includes(p));
+
+    if (selected.length === 0) {
+      return NextResponse.json({ error: "No valid phases selected" }, { status: 400 });
+    }
+
+    const requestedAt = new Date();
+    const results: Record<string, unknown> = {};
+
+    // Set pipeline state
+    const firstPhase = selected[0] === "retranslate" ? "translating" : selected[0] === "translate" ? "translating" : selected[0] === "enrich" ? "enriching" : "enriching";
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: {
+        value: JSON.stringify({
+          trigger: "manual-phases",
+          status: firstPhase,
+          startedAt: requestedAt.toISOString(),
+          phases: selected,
+          finishedAt: null,
+          error: null,
+          updatedAt: requestedAt.toISOString(),
+        }),
+      },
+      create: {
+        key: "pipelineState",
+        value: JSON.stringify({
+          trigger: "manual-phases",
+          status: firstPhase,
+          startedAt: requestedAt.toISOString(),
+          phases: selected,
+          finishedAt: null,
+          error: null,
+          updatedAt: requestedAt.toISOString(),
+        }),
+      },
+    });
+
+    try {
+      // Phase: retranslate — clear existing translations first, then translate
+      if (selected.includes("retranslate")) {
+        await updatePipelineState("translating");
+        const cleared = await prisma.product.updateMany({
+          data: { nameEn: null, categoryEn: null },
+        });
+        results.retranslateCleared = cleared.count;
+        const translateResult = await doTranslateProducts();
+        results.translate = translateResult;
+      }
+      // Phase: translate — only untranslated products
+      else if (selected.includes("translate")) {
+        await updatePipelineState("translating");
+        const translateResult = await doTranslateProducts();
+        results.translate = translateResult;
+      }
+
+      // Phase: enrich — run embedder pipeline (embed + categorize + LLM enrich + group)
+      if (selected.includes("enrich") || selected.includes("reprocess")) {
+        await updatePipelineState("enriching");
+        const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
+        try {
+          const res = await fetch(`${embedderUrl}/process`, {
+            method: "POST",
+            signal: AbortSignal.timeout(600000),
+          });
+          if (res.ok) {
+            results.enrich = await res.json();
+          } else {
+            results.enrich = { error: `Embedder returned ${res.status}` };
+          }
+        } catch {
+          results.enrich = { error: "Embedder service not available" };
+        }
+      }
+
+      // Done
+      await prisma.settings.upsert({
+        where: { key: "pipelineState" },
+        update: {
+          value: JSON.stringify({
+            trigger: "manual-phases",
+            status: "done",
+            startedAt: requestedAt.toISOString(),
+            phases: selected,
+            finishedAt: new Date().toISOString(),
+            error: null,
+            updatedAt: new Date().toISOString(),
+          }),
+        },
+        create: {
+          key: "pipelineState",
+          value: JSON.stringify({ status: "done" }),
+        },
+      });
+
+      return NextResponse.json({ success: true, phases: selected, results });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await prisma.settings.upsert({
+        where: { key: "pipelineState" },
+        update: {
+          value: JSON.stringify({
+            trigger: "manual-phases",
+            status: "error",
+            error: message,
+            finishedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }),
+        },
+        create: {
+          key: "pipelineState",
+          value: JSON.stringify({ status: "error", error: message }),
+        },
+      });
+      return NextResponse.json({ success: false, error: message }, { status: 500 });
+    }
+  }
+
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+}
+
+function normalizeForIndex(text: string): string {
+  const LT: Record<string, string> = {
+    'ą': 'a', 'č': 'c', 'ę': 'e', 'ė': 'e', 'į': 'i',
+    'š': 's', 'ų': 'u', 'ū': 'u', 'ž': 'z',
+  };
+  let r = text.toLowerCase();
+  for (const [f, t] of Object.entries(LT)) r = r.replaceAll(f, t);
+  return r.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+async function updatePipelineState(status: string) {
+  try {
+    const existing = await prisma.settings.findUnique({ where: { key: "pipelineState" } });
+    const state = existing?.value ? JSON.parse(existing.value) : {};
+    const merged = { ...state, status, updatedAt: new Date().toISOString() };
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: { value: JSON.stringify(merged) },
+      create: { key: "pipelineState", value: JSON.stringify(merged) },
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function doTranslateProducts(): Promise<{ translated: number }> {
+  let totalTranslated = 0;
+
+  while (true) {
+    const untranslated = await prisma.product.findMany({
+      where: { nameEn: null },
+      select: { id: true, nameLt: true, categoryLt: true },
+      take: 200,
+    });
+
+    if (untranslated.length === 0) break;
+
+    const names = untranslated.map((p) => p.nameLt);
+    const translatedNames = await translateBatch(names);
+
+    // Translate categories too
+    const categories = untranslated
+      .map((p) => p.categoryLt)
+      .filter((c): c is string => !!c);
+    const uniqueCategories = [...new Set(categories)];
+    const translatedCategories = uniqueCategories.length > 0
+      ? await translateBatch(uniqueCategories)
+      : [];
+    const catMap = new Map<string, string>();
+    uniqueCategories.forEach((c, i) => catMap.set(c, translatedCategories[i]));
+
+    for (let i = 0; i < untranslated.length; i++) {
+      const nameEn = translatedNames[i];
+      const categoryEn = untranslated[i].categoryLt
+        ? catMap.get(untranslated[i].categoryLt!) || undefined
+        : undefined;
+
+      const searchParts = [
+        untranslated[i].nameLt,
+        nameEn,
+        untranslated[i].categoryLt,
+        categoryEn,
+      ].filter(Boolean);
+      const searchIndex = normalizeForIndex(searchParts.join(" "));
+
+      await prisma.product.update({
+        where: { id: untranslated[i].id },
+        data: { nameEn, categoryEn, searchIndex },
+      });
+    }
+
+    totalTranslated += untranslated.length;
+  }
+
+  return { translated: totalTranslated };
 }

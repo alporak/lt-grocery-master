@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
-import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Database, Sparkles, Check, AlertCircle, Loader2 } from "lucide-react";
+import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Database, Sparkles, Check, AlertCircle, Loader2, Languages, Brain, RotateCcw } from "lucide-react";
 
 interface PipelineState {
   status: "idle" | "clearing" | "scraping" | "translating" | "enriching" | "done" | "error";
@@ -44,6 +44,7 @@ export default function SettingsPage() {
   const [scrapingLocations, setScrapingLocations] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineState>({ status: "idle" });
   const [triggering, setTriggering] = useState(false);
+  const [selectedPhases, setSelectedPhases] = useState<Set<string>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchPipelineStatus = useCallback(async () => {
@@ -117,6 +118,38 @@ export default function SettingsPage() {
       const data = await res.json();
       if (data.success) {
         // Immediately start polling
+        await fetchPipelineStatus();
+      }
+    } catch { /* ignore */ }
+    setTriggering(false);
+  };
+
+  const togglePhase = (phase: string) => {
+    setSelectedPhases((prev) => {
+      const next = new Set(prev);
+      if (next.has(phase)) {
+        next.delete(phase);
+      } else {
+        // retranslate and translate are mutually exclusive
+        if (phase === "retranslate") next.delete("translate");
+        if (phase === "translate") next.delete("retranslate");
+        next.add(phase);
+      }
+      return next;
+    });
+  };
+
+  const runPhases = async () => {
+    if (selectedPhases.size === 0) return;
+    setTriggering(true);
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "run-phases", phases: [...selectedPhases] }),
+      });
+      const data = await res.json();
+      if (data.success) {
         await fetchPipelineStatus();
       }
     } catch { /* ignore */ }
@@ -289,12 +322,12 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Full rebuild */}
-      <Card className={pipelineActive ? "border-primary" : pipelineError ? "border-destructive" : "border-primary/30"}>
+      {/* Pipeline Phases */}
+      <Card className={pipelineActive ? "border-primary" : pipelineError ? "border-destructive" : ""}>
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
             <Database className="h-5 w-5" />
-            {language === "lt" ? "Pilnas duomenų atnaujinimas" : "Full Database Rebuild"}
+            {language === "lt" ? "Duomenų apdorojimas" : "Data Processing"}
             {pipelineActive && <Loader2 className="h-4 w-4 animate-spin ml-auto text-primary" />}
             {pipelineDone && <Check className="h-4 w-4 ml-auto text-green-500" />}
             {pipelineError && <AlertCircle className="h-4 w-4 ml-auto text-destructive" />}
@@ -309,7 +342,7 @@ export default function SettingsPage() {
                 {PIPELINE_STEPS.map((step, i) => {
                   const isCompleted = pipelineDone || (stepIndex > i);
                   const isCurrent = stepIndex === i && pipelineActive;
-                  const isErrorStep = pipelineError && i === 0; // show error at first
+                  const isErrorStep = pipelineError && i === 0;
                   return (
                     <div key={step} className="flex items-center gap-1 flex-1">
                       <div className={`
@@ -378,28 +411,160 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {/* Description + button */}
+          {/* Phase selection */}
           {!pipelineActive && (
             <>
               <p className="text-sm text-muted-foreground">
                 {language === "lt"
-                  ? "Vienas veiksmas: išvalo esamus produktus, paleidžia pilną nuskaitymą ir po to praturtinimą."
-                  : "One action: clears current products, runs a full scrape, then starts enrichment."}
+                  ? "Pasirinkite vieną ar daugiau etapų ir paleiskite."
+                  : "Select one or more phases to run."}
               </p>
+
+              <div className="grid gap-2">
+                {/* Translate untranslated */}
+                <button
+                  onClick={() => togglePhase("translate")}
+                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                    selectedPhases.has("translate")
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
+                    selectedPhases.has("translate") ? "bg-primary text-primary-foreground" : "bg-muted"
+                  }`}>
+                    <Languages className="h-4 w-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">
+                      {language === "lt" ? "Versti naujus produktus" : "Translate new products"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {language === "lt"
+                        ? "Versti tik neišverstus produktus (LT → EN)"
+                        : "Translate only untranslated products (LT → EN)"}
+                    </p>
+                  </div>
+                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                    selectedPhases.has("translate") ? "border-primary bg-primary" : "border-muted-foreground/30"
+                  }`}>
+                    {selectedPhases.has("translate") && <Check className="h-3 w-3 text-primary-foreground" />}
+                  </div>
+                </button>
+
+                {/* Re-translate all */}
+                <button
+                  onClick={() => togglePhase("retranslate")}
+                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                    selectedPhases.has("retranslate")
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
+                    selectedPhases.has("retranslate") ? "bg-primary text-primary-foreground" : "bg-muted"
+                  }`}>
+                    <RotateCcw className="h-4 w-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">
+                      {language === "lt" ? "Perversti visus produktus" : "Re-translate all products"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {language === "lt"
+                        ? "Išvalyti esamus vertimus ir versti viską iš naujo"
+                        : "Clear existing translations and re-translate everything"}
+                    </p>
+                  </div>
+                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                    selectedPhases.has("retranslate") ? "border-primary bg-primary" : "border-muted-foreground/30"
+                  }`}>
+                    {selectedPhases.has("retranslate") && <Check className="h-3 w-3 text-primary-foreground" />}
+                  </div>
+                </button>
+
+                {/* Enrich */}
+                <button
+                  onClick={() => togglePhase("enrich")}
+                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                    selectedPhases.has("enrich")
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
+                    selectedPhases.has("enrich") ? "bg-primary text-primary-foreground" : "bg-muted"
+                  }`}>
+                    <Brain className="h-4 w-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">
+                      {language === "lt" ? "Praturtinti duomenis" : "Enrich data"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {language === "lt"
+                        ? "Embedding, kategorijos, LLM praturtinimas, grupavimas"
+                        : "Embedding, categories, LLM enrichment, grouping"}
+                    </p>
+                  </div>
+                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                    selectedPhases.has("enrich") ? "border-primary bg-primary" : "border-muted-foreground/30"
+                  }`}>
+                    {selectedPhases.has("enrich") && <Check className="h-3 w-3 text-primary-foreground" />}
+                  </div>
+                </button>
+              </div>
+
+              {/* Run selected phases */}
               <Button
-                onClick={rebuildDatabase}
-                disabled={triggering}
+                onClick={runPhases}
+                disabled={triggering || selectedPhases.size === 0}
                 className="w-full gap-2"
                 size="lg"
               >
                 {triggering ? (
-                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Sparkles className="h-4 w-4" />
                 )}
                 {triggering
-                  ? (language === "lt" ? "Paleidžiama..." : "Starting...")
-                  : (language === "lt" ? "Perdaryti duomenų bazę" : "Redo Database: Scrape + Enrich")}
+                  ? (language === "lt" ? "Vykdoma..." : "Running...")
+                  : selectedPhases.size === 0
+                    ? (language === "lt" ? "Pasirinkite etapus" : "Select phases to run")
+                    : `${language === "lt" ? "Vykdyti" : "Run"} ${selectedPhases.size} ${
+                        selectedPhases.size === 1
+                          ? (language === "lt" ? "etapą" : "phase")
+                          : (language === "lt" ? "etapus" : "phases")
+                      }`
+                }
+              </Button>
+
+              {/* Divider */}
+              <div className="relative py-2">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-border" />
+                </div>
+                <div className="relative flex justify-center text-xs">
+                  <span className="bg-card px-2 text-muted-foreground">
+                    {language === "lt" ? "arba" : "or"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Full rebuild */}
+              <Button
+                onClick={rebuildDatabase}
+                disabled={triggering}
+                variant="outline"
+                className="w-full gap-2"
+                size="sm"
+              >
+                {triggering ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Database className="h-4 w-4" />
+                )}
+                {language === "lt" ? "Pilnas perkūrimas (valyti + nuskaityti + praturtinti)" : "Full rebuild (clear + scrape + enrich)"}
               </Button>
             </>
           )}
