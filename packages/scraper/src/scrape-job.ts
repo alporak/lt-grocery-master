@@ -86,6 +86,9 @@ export async function runScrapeJob(storeSlug?: string) {
   // Translate untranslated products
   await translateNewProducts();
 
+  // Notify embedder service to process new/updated products
+  await notifyEmbedder();
+
   // Clean up old price records
   await cleanupOldRecords();
 }
@@ -93,8 +96,9 @@ export async function runScrapeJob(storeSlug?: string) {
 async function saveProducts(storeId: number, products: ScrapedProduct[]) {
   for (const p of products) {
     try {
-      // Upsert product
-      const searchIndex = normalizeForIndex(p.nameLt);
+      // Upsert product — searchIndex includes all searchable fields
+      const searchParts = [p.nameLt, p.categoryLt, p.brand].filter(Boolean);
+      const searchIndex = normalizeForIndex(searchParts.join(" "));
       const product = await prisma.product.upsert({
         where: {
           storeId_externalId: {
@@ -169,15 +173,28 @@ async function translateNewProducts() {
     const catMap = new Map<string, string>();
     uniqueCategories.forEach((c, i) => catMap.set(c, translatedCategories[i]));
 
-    // Update products
+    // Update products with translations and rebuild searchIndex
     for (let i = 0; i < untranslated.length; i++) {
+      const nameEn = translatedNames[i];
+      const categoryEn = untranslated[i].categoryLt
+        ? catMap.get(untranslated[i].categoryLt!) || undefined
+        : undefined;
+
+      // Rebuild searchIndex to include English name
+      const searchParts = [
+        untranslated[i].nameLt,
+        nameEn,
+        untranslated[i].categoryLt,
+        categoryEn,
+      ].filter(Boolean);
+      const searchIndex = normalizeForIndex(searchParts.join(" "));
+
       await prisma.product.update({
         where: { id: untranslated[i].id },
         data: {
-          nameEn: translatedNames[i],
-          categoryEn: untranslated[i].categoryLt
-            ? catMap.get(untranslated[i].categoryLt!) || undefined
-            : undefined,
+          nameEn,
+          categoryEn,
+          searchIndex,
         },
       });
     }
@@ -205,5 +222,20 @@ async function cleanupOldRecords() {
     }
   } catch (err) {
     console.error("[Cleanup] Error:", err);
+  }
+}
+
+async function notifyEmbedder() {
+  const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
+  try {
+    const res = await fetch(`${embedderUrl}/process`, { method: "POST" });
+    if (res.ok) {
+      const data = await res.json();
+      console.log(`[Embedder] Processing complete:`, data);
+    } else {
+      console.warn(`[Embedder] Process returned ${res.status}`);
+    }
+  } catch {
+    console.warn("[Embedder] Service not available, skipping embedding generation");
   }
 }

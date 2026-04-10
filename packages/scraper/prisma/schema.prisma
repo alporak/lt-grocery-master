@@ -52,6 +52,9 @@ model Product {
   productUrl  String?
   barcode      String?
   searchIndex  String?   // normalized lowercase no-diacritics name for search
+  canonicalCategory String? // embedder-assigned normalized category ID
+  enrichment   String?   // JSON blob from LLM enrichment
+  enrichedAt   DateTime? // when LLM enrichment was last run
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -63,6 +66,7 @@ model Product {
   @@index([categoryLt])
   @@index([storeId])
   @@index([searchIndex])
+  @@index([canonicalCategory])
 }
 
 model PriceRecord {

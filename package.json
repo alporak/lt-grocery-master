@@ -4,5 +4,11 @@
   "private": true,
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "scripts": {
+    "export-data": "docker compose exec embedder python -c \"from main import _do_export; print(_do_export())\"",
+    "import-data": "docker compose exec embedder python -c \"from main import _do_import; print(_do_import())\"",
+    "process-embeddings": "docker compose exec embedder python -c \"import httpx; print(httpx.post('http://localhost:8000/process').json())\"",
+    "pull-ollama-model": "docker compose --profile full exec ollama ollama pull gemma2:2b"
+  }
 }

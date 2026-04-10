@@ -1,5 +1,5 @@
 import { prisma } from "./db";
-import { normalizeText, buildSearchConditions } from "./search";
+import { normalizeText, buildSearchConditions, semanticSearch } from "./search";
 import { haversineDistance } from "./distance";
 
 interface CompareItem {
@@ -225,13 +225,38 @@ export async function compareGroceryList(
 
 /**
  * Fuzzy-match a grocery item name against products in a specific store.
- * Returns the best matching product with its latest price.
+ * Uses semantic search first, falls back to keyword matching.
  */
 async function findBestMatch(
   storeId: number,
   itemName: string,
   language: string
 ): Promise<StoreMatch | null> {
+  // Try semantic search first
+  const semanticResults = await semanticSearch(itemName, 5, [storeId]);
+  if (semanticResults && semanticResults.length > 0) {
+    // Pick the best match above a similarity threshold
+    const best = semanticResults[0];
+    if (best.score >= 0.4) {
+      const product = await prisma.product.findUnique({
+        where: { id: best.id },
+        include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
+      });
+      if (product && product.priceRecords[0]) {
+        const pr = product.priceRecords[0];
+        return {
+          productId: product.id,
+          productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
+          price: pr.regularPrice,
+          unitPrice: pr.unitPrice ?? undefined,
+          salePrice: pr.salePrice ?? undefined,
+          loyaltyPrice: pr.loyaltyPrice ?? undefined,
+        };
+      }
+    }
+  }
+
+  // Fallback: keyword matching
   const normalized = normalizeText(itemName);
   const words = normalized.split(/\s+/).filter((w) => w.length > 2);
   if (words.length === 0) return null;

@@ -8,6 +8,7 @@ services:
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
       - LIBRETRANSLATE_URL=http://libretranslate:5000
+      - EMBEDDER_URL=http://embedder:8000
       - PORT=3130
       - NODE_ENV=production
     volumes:
@@ -20,9 +21,11 @@ services:
     build:
       context: .
       dockerfile: packages/scraper/Dockerfile
+    profiles: ["scraper", "full"]
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
       - LIBRETRANSLATE_URL=http://libretranslate:5000
+      - EMBEDDER_URL=http://embedder:8000
       - SCRAPE_HEADLESS=true
       - SCRAPE_INTERVAL_HOURS=24
     volumes:
@@ -30,6 +33,38 @@ services:
     depends_on:
       - libretranslate
       - web
+      - embedder
+    restart: unless-stopped
+
+  embedder:
+    build:
+      context: .
+      dockerfile: packages/embedder/Dockerfile
+    environment:
+      - DATA_DIR=/app/data
+      - MODEL_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=gemma2:2b
+      - ENRICH_BATCH_SIZE=500
+    volumes:
+      - grocery-data:/app/data
+    depends_on:
+      - libretranslate
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["full"]
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 3G
     restart: unless-stopped
 
   libretranslate:
@@ -45,3 +80,4 @@ services:
 volumes:
   grocery-data:
   lt-data:
+  ollama-data:
