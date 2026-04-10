@@ -6,6 +6,10 @@
     "packages/*"
   ],
   "scripts": {
+    "up": "docker compose --profile full up -d --build",
+    "down": "docker compose --profile full down",
+    "down:clean": "docker compose --profile full down -v",
+    "logs": "docker compose --profile full logs -f",
     "export-data": "docker compose exec embedder python -c \"from main import _do_export; print(_do_export())\"",
     "import-data": "docker compose exec embedder python -c \"from main import _do_import; print(_do_import())\"",
     "process-embeddings": "docker compose exec embedder python -c \"import httpx; print(httpx.post('http://localhost:8000/process').json())\"",

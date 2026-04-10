@@ -11,7 +11,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
-import { MapPin, Navigation } from "lucide-react";
+import { MapPin, Navigation, AlertCircle } from "lucide-react";
+import Link from "next/link";
 
 interface StoreLocation {
   id: number;
@@ -37,7 +38,7 @@ interface StoreData {
 }
 
 export default function StoresPage() {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [stores, setStores] = useState<StoreData[]>([]);
   const [chainFilter, setChainFilter] = useState("all");
 
@@ -48,6 +49,8 @@ export default function StoresPage() {
       .then(setStores)
       .catch(() => {});
   }, [chainFilter]);
+
+  const totalLocations = stores.reduce((sum, s) => sum + s.locations.length, 0);
 
   const sizeLabel: Record<string, string> = {
     SMALL: t("stores.small"),
@@ -100,6 +103,32 @@ export default function StoresPage() {
         </Card>
       ) : (
         <div className="space-y-6">
+          {totalLocations === 0 && (
+            <Card className="border-amber-300 bg-amber-50 dark:bg-amber-950/20">
+              <CardContent className="py-4">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                      {language === "lt"
+                        ? "Parduotuvi\u0173 vietos dar neimportuotos"
+                        : "Store locations not imported yet"}
+                    </p>
+                    <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
+                      {language === "lt"
+                        ? "Eikite \u012f Nustatymai ir importuokite parduotuvi\u0173 vietas, kad matytum\u0117te artimiausias parduotuves."
+                        : "Go to Settings and click Import store locations from web to see nearest stores."}
+                    </p>
+                    <Link href="/settings" className="inline-block mt-2">
+                      <span className="text-xs font-medium text-primary hover:underline">
+                        {t("nav.settings")} →
+                      </span>
+                    </Link>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
           {stores.map((store) => (
             <Card
               key={store.id}

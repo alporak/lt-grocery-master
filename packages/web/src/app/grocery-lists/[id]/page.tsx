@@ -379,7 +379,7 @@ export default function GroceryListDetailPage() {
                           }`}
                         >
                           <div className="flex-1 min-w-0">
-                            <p className="truncate font-medium">{s.name}</p>
+                            <p className="font-medium">{s.name}</p>
                             <p className="text-xs text-muted-foreground">{s.store}</p>
                           </div>
                           {s.price != null && (

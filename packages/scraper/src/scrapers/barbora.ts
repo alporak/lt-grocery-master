@@ -235,22 +235,28 @@ export class BarboraScraper {
     let unitLabel: string | undefined;
     let campaignText: string | undefined;
 
-    const priceMatches = [...text.matchAll(/(\d+[.,]\d+)\s*€/g)];
-    if (priceMatches.length >= 1) {
-      regularPrice = parseFloat(priceMatches[0][1].replace(",", "."));
-    }
-
+    // 1. Extract unit price first
     const unitMatch = text.match(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/i);
     if (unitMatch) {
       unitPrice = parseFloat(unitMatch[1].replace(",", "."));
       unitLabel = `€/${unitMatch[2]}`;
     }
 
+    // 2. Strip unit prices before finding package prices
+    const cleaned = text.replace(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/gi, "");
+
+    // 3. Find package prices only
+    const priceMatches = [...cleaned.matchAll(/(\d+[.,]\d+)\s*€/g)];
+    if (priceMatches.length >= 1) {
+      regularPrice = parseFloat(priceMatches[0][1].replace(",", "."));
+    }
+
+    // 4. Discount: if % off and two prices, first is sale, last is original
     const discountMatch = text.match(/[–-](\d+)%/);
     if (discountMatch && priceMatches.length >= 2) {
       salePrice = regularPrice;
       regularPrice = parseFloat(
-        priceMatches[priceMatches.length >= 3 ? 2 : 1][1].replace(",", ".")
+        priceMatches[priceMatches.length - 1][1].replace(",", ".")
       );
     }
 

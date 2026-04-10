@@ -189,40 +189,42 @@ export class LastmileScraper extends BaseScraper {
     let loyaltyPrice: number | undefined;
     let campaignText: string | undefined;
 
-    // Find all price-like patterns (number followed by €)
-    const priceMatches = [...text.matchAll(/(\d+[.,]\d+)\s*€/g)];
+    // 1. Extract unit price — use last match (regular unit price, not loyalty)
+    const unitMatches = [...text.matchAll(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/gi)];
+    if (unitMatches.length > 0) {
+      const lastUnit = unitMatches[unitMatches.length - 1];
+      unitPrice = parseFloat(lastUnit[1].replace(",", "."));
+      unitLabel = `€/${lastUnit[2]}`;
+    }
+
+    // 2. Strip unit prices and deposit text before extracting package prices
+    const cleaned = text
+      .replace(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/gi, "")
+      .replace(/Depozitas\s+\d+[.,]\d+\s*€/gi, "");
+
+    // 3. Find package prices only
+    const priceMatches = [...cleaned.matchAll(/(\d+[.,]\d+)\s*€/g)];
 
     if (priceMatches.length >= 1) {
       regularPrice = parseFloat(priceMatches[0][1].replace(",", "."));
     }
 
-    // Unit price pattern: "X.XX € / kg" or "X.XX € / l" etc.
-    const unitPriceMatch = text.match(
-      /(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/i
-    );
-    if (unitPriceMatch) {
-      unitPrice = parseFloat(unitPriceMatch[1].replace(",", "."));
-      unitLabel = `€/${unitPriceMatch[2]}`;
-    }
-
-    // Check for loyalty price (Lojalumo kortelė)
-    if (text.includes("Lojalumo kortel")) {
-      // If loyalty card text present, the first price is usually the loyalty price
-      // and there's a higher "regular" price after it
-      if (priceMatches.length >= 3) {
-        loyaltyPrice = parseFloat(priceMatches[0][1].replace(",", "."));
-        regularPrice = parseFloat(
-          priceMatches[priceMatches.length > 3 ? 2 : priceMatches.length - 1][1].replace(",", ".")
-        );
-        salePrice = loyaltyPrice;
+    // 4. Loyalty pricing: first = loyalty, last = regular
+    if (text.includes("Lojalumo kortel") && priceMatches.length >= 2) {
+      loyaltyPrice = parseFloat(priceMatches[0][1].replace(",", "."));
+      regularPrice = parseFloat(priceMatches[priceMatches.length - 1][1].replace(",", "."));
+      salePrice = loyaltyPrice;
+    } else if (priceMatches.length >= 2) {
+      // Non-loyalty sale: first = sale, last = regular (only if different)
+      const first = parseFloat(priceMatches[0][1].replace(",", "."));
+      const last = parseFloat(priceMatches[priceMatches.length - 1][1].replace(",", "."));
+      if (first !== last) {
+        salePrice = first;
+        regularPrice = last;
       }
-    } else if (priceMatches.length >= 3) {
-      // Has old price (sale scenario without loyalty)
-      salePrice = regularPrice;
-      regularPrice = parseFloat(priceMatches[2][1].replace(",", "."));
     }
 
-    // Check for campaign text patterns
+    // 5. Campaign text
     const campaignMatch = text.match(
       /(1\+1|2\+1|Gauk \d+ už [\d.,]+ €|[–-]\d+%)/i
     );

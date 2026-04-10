@@ -14,6 +14,10 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  Brain,
+  Tags,
+  Sparkles,
+  Cpu,
 } from "lucide-react";
 
 interface DashboardStats {
@@ -52,6 +56,15 @@ interface StoreStatus {
   recentLogs: ScrapeLogEntry[];
 }
 
+interface EnrichmentStats {
+  totalProducts: number;
+  embeddingsCount: number;
+  categorizedCount: number;
+  enrichedCount: number;
+  embedderStatus: string;
+  topCategories: { category: string; count: number }[];
+}
+
 function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
   if (seconds < 60) return `<1m`;
@@ -68,6 +81,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [deals, setDeals] = useState<DealProduct[]>([]);
   const [storeStatuses, setStoreStatuses] = useState<StoreStatus[]>([]);
+  const [enrichment, setEnrichment] = useState<EnrichmentStats | null>(null);
 
   useEffect(() => {
     // Fetch products with sales
@@ -124,7 +138,20 @@ export default function DashboardPage() {
         .catch(() => {});
     fetchStatus();
     const statusInterval = setInterval(fetchStatus, 15000);
-    return () => clearInterval(statusInterval);
+
+    // Fetch enrichment stats
+    const fetchEnrichment = () =>
+      fetch("/api/enrichment-stats")
+        .then((r) => r.json())
+        .then((data: EnrichmentStats) => setEnrichment(data))
+        .catch(() => {});
+    fetchEnrichment();
+    const enrichInterval = setInterval(fetchEnrichment, 30000);
+
+    return () => {
+      clearInterval(statusInterval);
+      clearInterval(enrichInterval);
+    };
   }, [language]);
 
   return (
@@ -261,6 +288,135 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* AI Enrichment Status */}
+      {enrichment && (
+        <div>
+          <h2 className="text-xl font-semibold mb-4">
+            <Brain className="h-5 w-5 inline mr-2" />
+            {language === "lt" ? "AI apdorojimo būsena" : "AI Processing Status"}
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">
+                  {language === "lt" ? "Įterpimai" : "Embeddings"}
+                </CardTitle>
+                <Cpu className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{enrichment.embeddingsCount}</div>
+                <div className="mt-1">
+                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                    <span>{enrichment.totalProducts > 0 ? Math.round((enrichment.embeddingsCount / enrichment.totalProducts) * 100) : 0}%</span>
+                    <span>{enrichment.embeddingsCount}/{enrichment.totalProducts}</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all"
+                      style={{ width: `${enrichment.totalProducts > 0 ? (enrichment.embeddingsCount / enrichment.totalProducts) * 100 : 0}%` }}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">
+                  {language === "lt" ? "Kategorijos" : "Categorized"}
+                </CardTitle>
+                <Tags className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{enrichment.categorizedCount}</div>
+                <div className="mt-1">
+                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                    <span>{enrichment.totalProducts > 0 ? Math.round((enrichment.categorizedCount / enrichment.totalProducts) * 100) : 0}%</span>
+                    <span>{enrichment.categorizedCount}/{enrichment.totalProducts}</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-green-500 rounded-full transition-all"
+                      style={{ width: `${enrichment.totalProducts > 0 ? (enrichment.categorizedCount / enrichment.totalProducts) * 100 : 0}%` }}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">
+                  {language === "lt" ? "LLM praturtinta" : "LLM Enriched"}
+                </CardTitle>
+                <Sparkles className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{enrichment.enrichedCount}</div>
+                <div className="mt-1">
+                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                    <span>{enrichment.totalProducts > 0 ? Math.round((enrichment.enrichedCount / enrichment.totalProducts) * 100) : 0}%</span>
+                    <span>{enrichment.enrichedCount}/{enrichment.totalProducts}</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-purple-500 rounded-full transition-all"
+                      style={{ width: `${enrichment.totalProducts > 0 ? (enrichment.enrichedCount / enrichment.totalProducts) * 100 : 0}%` }}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">
+                  {language === "lt" ? "Embedder būsena" : "Embedder Service"}
+                </CardTitle>
+                {enrichment.embedderStatus === "online" ? (
+                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                ) : (
+                  <XCircle className="h-4 w-4 text-destructive" />
+                )}
+              </CardHeader>
+              <CardContent>
+                <div className={`text-lg font-bold ${enrichment.embedderStatus === "online" ? "text-green-600" : "text-destructive"}`}>
+                  {enrichment.embedderStatus === "online"
+                    ? (language === "lt" ? "Veikia" : "Online")
+                    : (language === "lt" ? "Nepasiekiamas" : "Offline")}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {language === "lt" ? "Semantinė paieška" : "Semantic search"}{" "}
+                  {enrichment.embeddingsCount > 0
+                    ? (language === "lt" ? "aktyvi" : "active")
+                    : (language === "lt" ? "neaktyvi" : "inactive")}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Top categories */}
+          {enrichment.topCategories.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm font-medium">
+                  {language === "lt" ? "Populiariausios kategorijos" : "Top Categories"}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap gap-2">
+                  {enrichment.topCategories.map((cat) => (
+                    <Badge key={cat.category} variant="secondary" className="text-xs">
+                      {cat.category} ({cat.count})
+                    </Badge>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
       {/* Current deals */}
       <div>
         <h2 className="text-xl font-semibold mb-4">
@@ -288,7 +444,7 @@ export default function DashboardPage() {
                         </Badge>
                       )}
                     </div>
-                    <h3 className="text-sm font-medium line-clamp-2 mb-2">
+                    <h3 className="text-sm font-medium mb-2">
                       {product.name}
                     </h3>
                     <div className="flex items-baseline gap-2">

@@ -94,112 +94,127 @@ export async function runScrapeJob(storeSlug?: string) {
 }
 
 async function saveProducts(storeId: number, products: ScrapedProduct[]) {
-  for (const p of products) {
-    try {
-      // Upsert product — searchIndex includes all searchable fields
-      const searchParts = [p.nameLt, p.categoryLt, p.brand].filter(Boolean);
-      const searchIndex = normalizeForIndex(searchParts.join(" "));
-      const product = await prisma.product.upsert({
-        where: {
-          storeId_externalId: {
-            storeId,
-            externalId: p.externalId,
-          },
-        },
-        update: {
-          nameLt: p.nameLt,
-          categoryLt: p.categoryLt || undefined,
-          brand: p.brand || undefined,
-          weightValue: p.weightValue || undefined,
-          weightUnit: p.weightUnit || undefined,
-          imageUrl: p.imageUrl || undefined,
-          productUrl: p.productUrl || undefined,
-          searchIndex,
-        },
-        create: {
-          storeId,
-          externalId: p.externalId,
-          nameLt: p.nameLt,
-          categoryLt: p.categoryLt || undefined,
-          brand: p.brand || undefined,
-          weightValue: p.weightValue || undefined,
-          weightUnit: p.weightUnit || undefined,
-          imageUrl: p.imageUrl || undefined,
-          productUrl: p.productUrl || undefined,
-          searchIndex,
-        },
-      });
+  // Process in batches of 50 within transactions to reduce SQLite lock contention
+  const BATCH = 50;
+  for (let i = 0; i < products.length; i += BATCH) {
+    const batch = products.slice(i, i + BATCH);
+    await prisma.$transaction(async (tx) => {
+      for (const p of batch) {
+        try {
+          const searchParts = [p.nameLt, p.categoryLt, p.brand].filter(Boolean);
+          const searchIndex = normalizeForIndex(searchParts.join(" "));
+          const product = await tx.product.upsert({
+            where: {
+              storeId_externalId: {
+                storeId,
+                externalId: p.externalId,
+              },
+            },
+            update: {
+              nameLt: p.nameLt,
+              categoryLt: p.categoryLt || undefined,
+              brand: p.brand || undefined,
+              weightValue: p.weightValue || undefined,
+              weightUnit: p.weightUnit || undefined,
+              imageUrl: p.imageUrl || undefined,
+              productUrl: p.productUrl || undefined,
+              searchIndex,
+            },
+            create: {
+              storeId,
+              externalId: p.externalId,
+              nameLt: p.nameLt,
+              categoryLt: p.categoryLt || undefined,
+              brand: p.brand || undefined,
+              weightValue: p.weightValue || undefined,
+              weightUnit: p.weightUnit || undefined,
+              imageUrl: p.imageUrl || undefined,
+              productUrl: p.productUrl || undefined,
+              searchIndex,
+            },
+          });
 
-      // Append price record (always create, never update — for history)
-      await prisma.priceRecord.create({
-        data: {
-          productId: product.id,
-          regularPrice: p.regularPrice,
-          salePrice: p.salePrice || undefined,
-          unitPrice: p.unitPrice || undefined,
-          unitLabel: p.unitLabel || undefined,
-          loyaltyPrice: p.loyaltyPrice || undefined,
-          campaignText: p.campaignText || undefined,
-        },
-      });
-    } catch (err) {
-      // Skip individual product errors (e.g., constraint violations)
-      console.warn(`[ScrapeJob] Product save error (${p.externalId}):`, err);
-    }
+          await tx.priceRecord.create({
+            data: {
+              productId: product.id,
+              regularPrice: p.regularPrice,
+              salePrice: p.salePrice || undefined,
+              unitPrice: p.unitPrice || undefined,
+              unitLabel: p.unitLabel || undefined,
+              loyaltyPrice: p.loyaltyPrice || undefined,
+              campaignText: p.campaignText || undefined,
+            },
+          });
+        } catch (err) {
+          console.warn(`[ScrapeJob] Product save error (${p.externalId}):`, err);
+        }
+      }
+    }, { timeout: 60000 }).catch(err => {
+      console.warn(`[ScrapeJob] Batch transaction error (batch ${i / BATCH + 1}):`, err);
+    });
   }
 }
 
 async function translateNewProducts() {
   try {
-    const untranslated = await prisma.product.findMany({
-      where: { nameEn: null },
-      select: { id: true, nameLt: true, categoryLt: true },
-      take: 200,
-    });
+    let totalTranslated = 0;
 
-    if (untranslated.length === 0) return;
-
-    console.log(`[Translate] Translating ${untranslated.length} products...`);
-
-    const names = untranslated.map((p) => p.nameLt);
-    const translatedNames = await translateBatch(names);
-
-    // Translate categories too
-    const categories = untranslated
-      .map((p) => p.categoryLt)
-      .filter((c): c is string => !!c);
-    const uniqueCategories = [...new Set(categories)];
-    const translatedCategories = await translateBatch(uniqueCategories);
-    const catMap = new Map<string, string>();
-    uniqueCategories.forEach((c, i) => catMap.set(c, translatedCategories[i]));
-
-    // Update products with translations and rebuild searchIndex
-    for (let i = 0; i < untranslated.length; i++) {
-      const nameEn = translatedNames[i];
-      const categoryEn = untranslated[i].categoryLt
-        ? catMap.get(untranslated[i].categoryLt!) || undefined
-        : undefined;
-
-      // Rebuild searchIndex to include English name
-      const searchParts = [
-        untranslated[i].nameLt,
-        nameEn,
-        untranslated[i].categoryLt,
-        categoryEn,
-      ].filter(Boolean);
-      const searchIndex = normalizeForIndex(searchParts.join(" "));
-
-      await prisma.product.update({
-        where: { id: untranslated[i].id },
-        data: {
-          nameEn,
-          categoryEn,
-          searchIndex,
-        },
+    // Translate in batches of 200 until all done
+    while (true) {
+      const untranslated = await prisma.product.findMany({
+        where: { nameEn: null },
+        select: { id: true, nameLt: true, categoryLt: true },
+        take: 200,
       });
+
+      if (untranslated.length === 0) break;
+
+      console.log(`[Translate] Translating batch of ${untranslated.length} products...`);
+
+      const names = untranslated.map((p) => p.nameLt);
+      const translatedNames = await translateBatch(names);
+
+      // Translate categories too
+      const categories = untranslated
+        .map((p) => p.categoryLt)
+        .filter((c): c is string => !!c);
+      const uniqueCategories = [...new Set(categories)];
+      const translatedCategories = await translateBatch(uniqueCategories);
+      const catMap = new Map<string, string>();
+      uniqueCategories.forEach((c, i) => catMap.set(c, translatedCategories[i]));
+
+      // Update products with translations and rebuild searchIndex
+      for (let i = 0; i < untranslated.length; i++) {
+        const nameEn = translatedNames[i];
+        const categoryEn = untranslated[i].categoryLt
+          ? catMap.get(untranslated[i].categoryLt!) || undefined
+          : undefined;
+
+        const searchParts = [
+          untranslated[i].nameLt,
+          nameEn,
+          untranslated[i].categoryLt,
+          categoryEn,
+        ].filter(Boolean);
+        const searchIndex = normalizeForIndex(searchParts.join(" "));
+
+        await prisma.product.update({
+          where: { id: untranslated[i].id },
+          data: {
+            nameEn,
+            categoryEn,
+            searchIndex,
+          },
+        });
+      }
+
+      totalTranslated += untranslated.length;
+      console.log(`[Translate] Batch done (${totalTranslated} total so far)`);
     }
 
-    console.log(`[Translate] Done translating ${untranslated.length} products`);
+    if (totalTranslated > 0) {
+      console.log(`[Translate] Finished — translated ${totalTranslated} products total`);
+    }
   } catch (err) {
     console.error("[Translate] Error:", err);
   }

@@ -15,7 +15,7 @@ export async function GET() {
     // Load the canonical category definitions from embedder
     try {
       const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
-      const res = await fetch(`${embedderUrl}/health`, { signal: AbortSignal.timeout(2000) });
+      const res = await fetch(`${embedderUrl}/health`, { signal: AbortSignal.timeout(2000), cache: "no-store" });
       if (res.ok) {
         const health = await res.json();
         // The categories are embedded in the health response indirectly;

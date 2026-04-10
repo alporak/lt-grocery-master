@@ -22,6 +22,16 @@ sqlite3 "$DB" "SELECT searchIndex FROM Product LIMIT 0;" 2>/dev/null || \
 sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS Product_searchIndex_idx ON Product(searchIndex);" 2>&1 || true
 # Create ScraperConfig table if missing
 sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS ScraperConfig (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, url TEXT NOT NULL, storeName TEXT NOT NULL, chain TEXT NOT NULL DEFAULT 'CUSTOM', containerSel TEXT NOT NULL, nameSel TEXT NOT NULL, priceSel TEXT NOT NULL, linkSel TEXT, imageSel TEXT, categorySel TEXT, paginationSel TEXT, enabled BOOLEAN NOT NULL DEFAULT 1, lastRunAt DATETIME, lastRunCount INTEGER NOT NULL DEFAULT 0, createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);" 2>&1 || true
+# Add enrichment columns to Product if missing
+sqlite3 "$DB" "SELECT canonicalCategory FROM Product LIMIT 0;" 2>/dev/null || \
+  sqlite3 "$DB" "ALTER TABLE Product ADD COLUMN canonicalCategory TEXT;" 2>&1 || true
+sqlite3 "$DB" "SELECT enrichment FROM Product LIMIT 0;" 2>/dev/null || \
+  sqlite3 "$DB" "ALTER TABLE Product ADD COLUMN enrichment TEXT;" 2>&1 || true
+sqlite3 "$DB" "SELECT enrichedAt FROM Product LIMIT 0;" 2>/dev/null || \
+  sqlite3 "$DB" "ALTER TABLE Product ADD COLUMN enrichedAt DATETIME;" 2>&1 || true
+sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS Product_canonicalCategory_idx ON Product(canonicalCategory);" 2>&1 || true
+# Enable WAL mode for concurrent access
+sqlite3 "$DB" "PRAGMA journal_mode=WAL;" 2>&1 || true
 echo "Schema migration done."
 
 exec su-exec nextjs node server.js

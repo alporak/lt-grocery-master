@@ -42,12 +42,12 @@ export default function GroceryListsPage() {
   }, []);
 
   const createList = async () => {
-    if (!newName.trim()) return;
+    const name = newName.trim() || `${t("groceryLists.title")} ${lists.length + 1}`;
     setCreating(true);
     await fetch("/api/grocery-lists", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newName.trim() }),
+      body: JSON.stringify({ name }),
     });
     setNewName("");
     setCreating(false);

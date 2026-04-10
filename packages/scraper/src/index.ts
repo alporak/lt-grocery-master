@@ -17,14 +17,48 @@ async function main() {
   console.log("[Scheduler] Starting scraper service...");
   let running = false;
 
-  // Run once on startup after a short delay
+  // Clean up stale "running" logs from previous interrupted runs
+  const staleCount = await prisma.scrapeLog.updateMany({
+    where: { status: "running" },
+    data: { status: "interrupted", finishedAt: new Date() },
+  });
+  if (staleCount.count > 0) {
+    console.log(`[Scheduler] Cleaned up ${staleCount.count} stale 'running' log(s).`);
+  }
+
+  // Run on startup only if any store actually needs scraping
   setTimeout(async () => {
     if (running) return;
-    running = true;
-    console.log("[Scheduler] Running initial scrape...");
     try {
-      await runScrapeJob();
-    } finally {
+      const intervalHours = await getInterval();
+      const stores = await prisma.store.findMany({
+        where: { enabled: true },
+        select: { lastScrapedAt: true },
+      });
+
+      const now = Date.now();
+      const needsScrape = stores.some((s) => {
+        if (!s.lastScrapedAt) return true;
+        const elapsed = now - s.lastScrapedAt.getTime();
+        return elapsed >= intervalHours * 60 * 60 * 1000;
+      });
+
+      if (!needsScrape) {
+        console.log(
+          `[Scheduler] All stores scraped within ${intervalHours}h, skipping startup scrape.`
+        );
+        return;
+      }
+
+      running = true;
+      console.log("[Scheduler] Stores need scraping, running initial scrape...");
+      try {
+        await runScrapeJob();
+      } finally {
+        running = false;
+      }
+    } catch (err) {
+      console.error("[Scheduler] Startup check error:", err);
       running = false;
     }
   }, 10_000);

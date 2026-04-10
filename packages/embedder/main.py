@@ -155,6 +155,23 @@ def health():
     }
 
 
+@app.post("/reset")
+def reset():
+    """Clear all embeddings from memory and disk."""
+    global embeddings, product_ids, product_store_ids
+    embeddings = None
+    product_ids = []
+    product_store_ids = []
+    emb_path = EMBEDDINGS_DIR / "embeddings.npy"
+    ids_path = EMBEDDINGS_DIR / "product_ids.json"
+    if emb_path.exists():
+        emb_path.unlink()
+    if ids_path.exists():
+        ids_path.unlink()
+    log.info("[Reset] Cleared all embeddings")
+    return {"status": "cleared", "embeddings_count": 0}
+
+
 @app.post("/embed-batch")
 def embed_batch(req: EmbedBatchRequest):
     global embeddings, product_ids, product_store_ids
@@ -262,6 +279,7 @@ async def enrich():
                         "model": OLLAMA_MODEL,
                         "prompt": prompt,
                         "stream": False,
+                        "format": ENRICH_SCHEMA,
                         "options": {"temperature": 0.1, "num_predict": 300},
                     })
                     if resp.status_code != 200:
@@ -346,50 +364,59 @@ def _build_product_text(row) -> str:
     return " | ".join(parts)
 
 
+# JSON schema for Ollama structured outputs — guarantees valid JSON matching this shape
+ENRICH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name_clean": {"type": "string"},
+        "is_food": {"type": "boolean"},
+        "primary_category": {"type": "string"},
+        "tags_en": {"type": "array", "items": {"type": "string"}},
+        "tags_lt": {"type": "array", "items": {"type": "string"}},
+        "attributes": {"type": "object"},
+    },
+    "required": ["name_clean", "is_food", "primary_category", "tags_en", "tags_lt"],
+}
+
+
 def _build_enrich_prompt(product_text: str) -> str:
-    return f"""Analyze this Lithuanian grocery product and respond with ONLY a JSON object (no markdown, no explanation).
+    return f"""You classify Lithuanian grocery products. Return a JSON object for this product.
 
-Product: {product_text}
+Examples:
 
-Return this JSON structure:
-{{"name_clean":"cleaned product name in English","is_food":true,"primary_category":"main food category in English","tags_en":["english","search","terms"],"tags_lt":["lithuanian","search","terms"],"attributes":{{"type":"e.g. fresh/frozen/canned","protein":"e.g. chicken/pork/none"}}}}
+Product: Rokiškio pienas 2.5% riebumo, 1L | Rokiškio milk 2.5% fat, 1L | Pieno produktai | Rokiškio
+Result: {{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{{"type":"fresh","packaging":"carton"}}}}
+
+Product: Fairy indų ploviklis Lemon 900ml | Fairy dish soap Lemon 900ml | Valymo priemonės
+Result: {{"name_clean":"Fairy Dish Soap Lemon 900ml","is_food":false,"primary_category":"Cleaning Products","tags_en":["dish soap","dishwashing","cleaning","fairy","lemon"],"tags_lt":["indų ploviklis","valymo priemonė","fairy","citrinos kvapas"],"attributes":{{"type":"liquid","scent":"lemon"}}}}
+
+Product: Karūna šokoladinis batonėlis su karamele 40g | Karūna chocolate bar with caramel 40g | Saldumynai | Karūna
+Result: {{"name_clean":"Karūna Chocolate Bar with Caramel 40g","is_food":true,"primary_category":"Sweets & Chocolate","tags_en":["chocolate","candy bar","caramel","sweet","snack","karūna"],"tags_lt":["šokoladas","batonėlis","karamelė","saldainiai","karūna","užkandis"],"attributes":{{"type":"confectionery","flavor":"caramel"}}}}
+
+Product: Pedigree šunims su jautiena 400g | Pedigree dog food with beef 400g | Gyvūnų maistas | Pedigree
+Result: {{"name_clean":"Pedigree Dog Food with Beef 400g","is_food":false,"primary_category":"Pet Food","tags_en":["dog food","pet food","pedigree","beef","dog"],"tags_lt":["šunų maistas","gyvūnų maistas","pedigree","jautiena","šuo"],"attributes":{{"type":"wet","protein":"beef"}}}}
 
 Rules:
-- tags should be common search words a shopper would use
-- primary_category should be broad (e.g. "Poultry", "Dairy", "Beverages", "Snacks")
-- is_food should be false for cleaning products, pet food, hygiene items etc.
-- include 3-8 tags per language
-- attributes should capture useful filterable properties
+- name_clean: English product name with brand and size
+- is_food: false for cleaning, pet food, hygiene, paper products
+- primary_category: broad English category (Dairy, Poultry, Beverages, Snacks, Cleaning Products, etc.)
+- tags_en: 4-7 English search words a shopper would use
+- tags_lt: 4-7 Lithuanian search words a shopper would use
+- attributes: filterable properties like type, flavor, scent, packaging
 
-JSON:"""
+Product: {product_text}
+Result:"""
 
 
 def _parse_enrichment(text: str) -> Optional[dict]:
-    """Parse LLM response, extracting JSON even if wrapped in markdown."""
+    """Parse LLM response. With format schema, Ollama guarantees valid JSON."""
     text = text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
     try:
         data = json.loads(text)
-        # Validate minimum expected fields
-        if isinstance(data, dict) and "tags_en" in data:
+        if isinstance(data, dict) and "name_clean" in data:
             return data
     except json.JSONDecodeError:
-        # Try to find JSON in the text
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                data = json.loads(text[start:end])
-                if isinstance(data, dict) and "tags_en" in data:
-                    return data
-            except json.JSONDecodeError:
-                pass
+        log.warning(f"[Enrich] Failed to parse response: {text[:200]}")
     return None
 
 
@@ -474,30 +501,37 @@ def _categorize_new_products() -> dict:
         return {"categorized": 0, "message": "Categories not loaded"}
 
     conn = get_db_rw()
+    total_categorized = 0
     try:
-        rows = conn.execute(
-            "SELECT id, nameLt, nameEn, categoryLt, brand FROM Product WHERE canonicalCategory IS NULL LIMIT 2000"
-        ).fetchall()
+        while True:
+            rows = conn.execute(
+                "SELECT id, nameLt, nameEn, categoryLt, brand FROM Product WHERE canonicalCategory IS NULL LIMIT 2000"
+            ).fetchall()
 
-        if not rows:
-            return {"categorized": 0, "message": "All products categorized"}
+            if not rows:
+                break
 
-        log.info(f"[Categorize] Categorizing {len(rows)} products...")
-        texts = [_build_product_text(r) for r in rows]
-        vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=True, batch_size=64)
-        similarities = vecs @ category_embeddings.T
-        best_indices = similarities.argmax(axis=1)
+            log.info(f"[Categorize] Categorizing {len(rows)} products (total so far: {total_categorized})...")
+            texts = [_build_product_text(r) for r in rows]
+            vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=True, batch_size=64)
+            similarities = vecs @ category_embeddings.T
+            best_indices = similarities.argmax(axis=1)
 
-        for i, row in enumerate(rows):
-            cat = canonical_categories[best_indices[i]]
-            conn.execute(
-                "UPDATE Product SET canonicalCategory = ? WHERE id = ?",
-                (cat["id"], row["id"])
-            )
+            for i, row in enumerate(rows):
+                cat = canonical_categories[best_indices[i]]
+                conn.execute(
+                    "UPDATE Product SET canonicalCategory = ? WHERE id = ?",
+                    (cat["id"], row["id"])
+                )
 
-        conn.commit()
-        log.info(f"[Categorize] Categorized {len(rows)} products")
-        return {"categorized": len(rows)}
+            conn.commit()
+            total_categorized += len(rows)
+
+            if len(rows) < 2000:
+                break
+
+        log.info(f"[Categorize] Categorized {total_categorized} products total")
+        return {"categorized": total_categorized}
     finally:
         conn.close()
 

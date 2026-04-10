@@ -18,7 +18,6 @@ const navItems = [
   { path: "/products", icon: Package, labelKey: "nav.products" },
   { path: "/grocery-lists", icon: ShoppingBasket, labelKey: "nav.groceryLists" },
   { path: "/stores", icon: MapPin, labelKey: "nav.stores" },
-  { path: "/scraper", icon: Globe, labelKey: "nav.scraper" },
   { path: "/settings", icon: Settings, labelKey: "nav.settings" },
 ];
 

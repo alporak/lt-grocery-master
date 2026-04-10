@@ -219,28 +219,45 @@ export class RimiScraper extends BaseScraper {
     let unitLabel: string | undefined;
     let campaignText: string | undefined;
 
-    // Main price patterns
-    const priceMatches = [...text.matchAll(/(\d+[.,]\d+)\s*€/g)];
-
-    if (priceMatches.length >= 1) {
-      regularPrice = parseFloat(priceMatches[0][1].replace(",", "."));
-    }
-
-    // Unit price
-    const unitMatch = text.match(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml|gab)/i);
+    // 1. Extract unit price first (e.g., "9,90 €/kg")
+    const unitMatch = text.match(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt\.?|ml|gab)/i);
     if (unitMatch) {
       unitPrice = parseFloat(unitMatch[1].replace(",", "."));
-      unitLabel = `€/${unitMatch[2]}`;
+      unitLabel = `€/${unitMatch[2].replace(".", "")}`;
     }
 
-    // Discount
+    // 2. Remove unit price text so it doesn't get confused with the package price
+    const cleaned = unitMatch ? text.replace(unitMatch[0], "") : text;
+
+    // 3. Find all package prices in text order
+    //    Format A: "1,99 €" or "1.99 €" (with decimal separator)
+    //    Format B: "199€" or "099€"     (Rimi no-separator: last 2 digits = cents)
+    const allPrices: number[] = [];
+    const priceRegex = /(\d+[.,]\d{2})\s*€|(\d{3,})\s*€/g;
+    let m: RegExpExecArray | null;
+    while ((m = priceRegex.exec(cleaned)) !== null) {
+      if (m[1]) {
+        allPrices.push(parseFloat(m[1].replace(",", ".")));
+      } else if (m[2]) {
+        const raw = m[2];
+        const euros = raw.slice(0, -2) || "0";
+        const cents = raw.slice(-2);
+        allPrices.push(parseFloat(`${euros}.${cents}`));
+      }
+    }
+
+    if (allPrices.length >= 1) {
+      regularPrice = allPrices[0];
+    }
+
+    // 4. Discount: if % off and two prices found, first is sale, second is original
     const discountMatch = text.match(/[–-](\d+)\s*%/);
-    if (discountMatch && priceMatches.length >= 2) {
-      salePrice = regularPrice;
-      regularPrice = parseFloat(priceMatches[1][1].replace(",", "."));
+    if (discountMatch && allPrices.length >= 2) {
+      salePrice = allPrices[0];
+      regularPrice = allPrices[1];
     }
 
-    // Campaign
+    // 5. Campaign text
     const campMatch = text.match(
       /([–-]\d+\s*%|\d+\s*\+\s*\d+|tik\s+[\d.,]+\s*€)/i
     );

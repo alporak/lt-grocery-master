@@ -276,13 +276,13 @@ export default function ProductsPage() {
                   </div>
 
                   <Link href={`/products/${product.id}`}>
-                    <h3 className="text-sm font-medium line-clamp-2 mb-1 min-h-[2.25rem] hover:text-primary cursor-pointer">
+                    <h3 className="text-sm font-medium mb-1 hover:text-primary cursor-pointer">
                       {product.name}
                     </h3>
                   </Link>
 
                   {product.category && (
-                    <p className="text-xs text-muted-foreground mb-2 truncate">
+                    <p className="text-xs text-muted-foreground mb-2">
                       {product.category}
                     </p>
                   )}

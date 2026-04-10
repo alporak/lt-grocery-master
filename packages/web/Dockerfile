@@ -33,6 +33,9 @@ COPY --from=builder /app/packages/web/.next/standalone ./
 COPY --from=builder /app/packages/web/.next/static ./.next/static
 COPY --from=builder /app/packages/web/public ./public
 
+# Ensure .next/cache exists and is writable by nextjs
+RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next
+
 # Copy Prisma runtime (needed by the app)
 COPY --from=builder /app/packages/web/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/packages/web/node_modules/@prisma ./node_modules/@prisma
@@ -40,8 +43,10 @@ COPY --from=builder /app/packages/web/node_modules/@prisma ./node_modules/@prism
 # Copy initialized database template
 COPY --from=builder /app/packages/web/init.db ./init.db
 
+# Copy static data files
+COPY data/store-locations.json ./store-locations.json
+
 # Create data directory
-RUN mkdir -p /app/data && chown nextjs:nodejs /app/data
 
 # Entrypoint
 COPY packages/web/docker-entrypoint.sh ./
