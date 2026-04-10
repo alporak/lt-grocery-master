@@ -2,16 +2,26 @@ const LIBRETRANSLATE_URL =
   process.env.LIBRETRANSLATE_URL || "http://localhost:5000";
 const EMBEDDER_URL = process.env.EMBEDDER_URL || "http://localhost:8000";
 
+export interface TranslateProviderConfig {
+  provider?: string;       // "groq" | "ollama"
+  ollama_url?: string;
+  ollama_model?: string;
+}
+
 async function translateLLM(
   text: string,
   source = "lt",
-  target = "en"
+  target = "en",
+  providerConfig?: TranslateProviderConfig
 ): Promise<string | null> {
   try {
     const res = await fetch(`${EMBEDDER_URL}/translate-batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ texts: [text], source, target }),
+      body: JSON.stringify({
+        texts: [text], source, target,
+        ...(providerConfig || {}),
+      }),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -31,10 +41,11 @@ async function translateLLM(
 export async function translate(
   text: string,
   source = "lt",
-  target = "en"
+  target = "en",
+  providerConfig?: TranslateProviderConfig
 ): Promise<string> {
   // Try LLM translation first
-  const llmResult = await translateLLM(text, source, target);
+  const llmResult = await translateLLM(text, source, target, providerConfig);
   if (llmResult) return llmResult;
 
   // Fall back to LibreTranslate
@@ -55,7 +66,8 @@ export async function translate(
 export async function translateBatch(
   texts: string[],
   source = "lt",
-  target = "en"
+  target = "en",
+  providerConfig?: TranslateProviderConfig
 ): Promise<string[]> {
   if (texts.length === 0) return [];
 
@@ -64,7 +76,7 @@ export async function translateBatch(
     const res = await fetch(`${EMBEDDER_URL}/translate-batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ texts, source, target }),
+      body: JSON.stringify({ texts, source, target, ...(providerConfig || {}) }),
     });
     if (res.ok) {
       const data = await res.json();

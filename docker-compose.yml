@@ -21,7 +21,6 @@ services:
     build:
       context: .
       dockerfile: packages/scraper/Dockerfile
-    profiles: ["scraper"]
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
       - LIBRETRANSLATE_URL=http://libretranslate:5000
@@ -46,6 +45,7 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
       - GROQ_BATCH_SIZE=${GROQ_BATCH_SIZE:-10}
+      - OLLAMA_URL=${OLLAMA_URL:-}
     volumes:
       - grocery-data:/app/data
     depends_on:

@@ -1,8 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { translateBatch } from "@/lib/translate";
+import { translateBatch, TranslateProviderConfig } from "@/lib/translate";
+import { getSettings } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
+
+async function getOllamaConfig() {
+  const settings = await getSettings();
+  const useOllama = String(settings.useOllamaForBulk) === "true";
+  const config = {
+    useOllama,
+    provider: useOllama ? "ollama" : "groq",
+    ollama_url: String(settings.ollamaUrl || ""),
+    ollama_model: String(settings.ollamaModel || "llama3.1:8b"),
+  };
+  console.log("[getOllamaConfig]", JSON.stringify(config));
+  return config;
+}
 
 export async function GET() {
   const setting = await prisma.settings.findUnique({ where: { key: "pipelineState" } });
@@ -182,14 +196,19 @@ export async function POST(req: NextRequest) {
       data: { enrichment: null, enrichedAt: null },
     });
 
-    // Trigger the bulk-enrich background worker (uses GROQ_API_KEY from env)
+    // Trigger the bulk-enrich background worker (respects Ollama settings)
     const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
+    const ollamaConfig = await getOllamaConfig();
     let enrichResult = null;
     try {
       const res = await fetch(`${embedderUrl}/bulk-enrich`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          provider: ollamaConfig.provider,
+          ollama_url: ollamaConfig.ollama_url,
+          ollama_model: ollamaConfig.ollama_model,
+        }),
         signal: AbortSignal.timeout(10000),
       });
       if (res.ok) {
@@ -224,6 +243,30 @@ export async function POST(req: NextRequest) {
         { status: 503 }
       );
     }
+  }
+
+  if (action === "stop-all") {
+    // Stop bulk enrichment
+    const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
+    let enrichStopped = false;
+    try {
+      const res = await fetch(`${embedderUrl}/bulk-enrich/stop`, {
+        method: "POST",
+        signal: AbortSignal.timeout(5000),
+      });
+      enrichStopped = res.ok;
+    } catch {
+      // embedder might not be running
+    }
+
+    // Reset pipeline state to idle
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: { value: JSON.stringify({ status: "idle", stoppedAt: new Date().toISOString() }) },
+      create: { key: "pipelineState", value: JSON.stringify({ status: "idle" }) },
+    });
+
+    return NextResponse.json({ success: true, enrichStopped });
   }
 
   if (action === "redo-database") {
@@ -317,17 +360,25 @@ export async function POST(req: NextRequest) {
       // Phase: retranslate — clear existing translations first, then translate
       if (selected.includes("retranslate")) {
         await updatePipelineState("translating");
+        const ollamaConfig = await getOllamaConfig();
+        const providerConfig: TranslateProviderConfig | undefined = ollamaConfig.useOllama
+          ? { provider: "ollama", ollama_url: ollamaConfig.ollama_url, ollama_model: ollamaConfig.ollama_model }
+          : undefined;
         const cleared = await prisma.product.updateMany({
           data: { nameEn: null, categoryEn: null },
         });
         results.retranslateCleared = cleared.count;
-        const translateResult = await doTranslateProducts();
+        const translateResult = await doTranslateProducts(providerConfig);
         results.translate = translateResult;
       }
       // Phase: translate — only untranslated products
       else if (selected.includes("translate")) {
         await updatePipelineState("translating");
-        const translateResult = await doTranslateProducts();
+        const ollamaConfig = await getOllamaConfig();
+        const providerConfig: TranslateProviderConfig | undefined = ollamaConfig.useOllama
+          ? { provider: "ollama", ollama_url: ollamaConfig.ollama_url, ollama_model: ollamaConfig.ollama_model }
+          : undefined;
+        const translateResult = await doTranslateProducts(providerConfig);
         results.translate = translateResult;
       }
 
@@ -335,9 +386,16 @@ export async function POST(req: NextRequest) {
       if (selected.includes("enrich") || selected.includes("reprocess")) {
         await updatePipelineState("enriching");
         const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
+        const ollamaConfig = await getOllamaConfig();
         try {
           const res = await fetch(`${embedderUrl}/process`, {
             method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              provider: ollamaConfig.provider,
+              ollama_url: ollamaConfig.ollama_url,
+              ollama_model: ollamaConfig.ollama_model,
+            }),
             signal: AbortSignal.timeout(600000),
           });
           if (res.ok) {
@@ -422,20 +480,20 @@ async function updatePipelineState(status: string) {
   }
 }
 
-async function doTranslateProducts(): Promise<{ translated: number }> {
+async function doTranslateProducts(providerConfig?: TranslateProviderConfig): Promise<{ translated: number }> {
   let totalTranslated = 0;
 
   while (true) {
     const untranslated = await prisma.product.findMany({
       where: { nameEn: null },
       select: { id: true, nameLt: true, categoryLt: true },
-      take: 200,
+      take: 400,
     });
 
     if (untranslated.length === 0) break;
 
     const names = untranslated.map((p) => p.nameLt);
-    const translatedNames = await translateBatch(names);
+    const translatedNames = await translateBatch(names, "lt", "en", providerConfig);
 
     // Translate categories too
     const categories = untranslated
@@ -443,32 +501,44 @@ async function doTranslateProducts(): Promise<{ translated: number }> {
       .filter((c): c is string => !!c);
     const uniqueCategories = [...new Set(categories)];
     const translatedCategories = uniqueCategories.length > 0
-      ? await translateBatch(uniqueCategories)
+      ? await translateBatch(uniqueCategories, "lt", "en", providerConfig)
       : [];
     const catMap = new Map<string, string>();
     uniqueCategories.forEach((c, i) => catMap.set(c, translatedCategories[i]));
 
-    for (let i = 0; i < untranslated.length; i++) {
-      const nameEn = translatedNames[i];
-      const categoryEn = untranslated[i].categoryLt
-        ? catMap.get(untranslated[i].categoryLt!) || undefined
-        : undefined;
+    const updateChunkSize = 80;
+    for (let ci = 0; ci < untranslated.length; ci += updateChunkSize) {
+      const chunk = untranslated.slice(ci, ci + updateChunkSize);
+      await Promise.all(
+        chunk.map(async (row, j) => {
+          const i = ci + j;
+          const nameEn = translatedNames[i];
+          const categoryEn = row.categoryLt
+            ? catMap.get(row.categoryLt) || undefined
+            : undefined;
 
-      const searchParts = [
-        untranslated[i].nameLt,
-        nameEn,
-        untranslated[i].categoryLt,
-        categoryEn,
-      ].filter(Boolean);
-      const searchIndex = normalizeForIndex(searchParts.join(" "));
+          const searchParts = [
+            row.nameLt,
+            nameEn,
+            row.categoryLt,
+            categoryEn,
+          ].filter(Boolean);
+          const searchIndex = normalizeForIndex(searchParts.join(" "));
 
-      await prisma.product.update({
-        where: { id: untranslated[i].id },
-        data: { nameEn, categoryEn, searchIndex },
-      });
+          try {
+            await prisma.product.update({
+              where: { id: row.id },
+              data: { nameEn, categoryEn, searchIndex },
+            });
+          } catch {
+            // Product may have been deleted by scraper — skip
+          }
+        })
+      );
     }
 
     totalTranslated += untranslated.length;
+    await updatePipelineState("translating");
   }
 
   return { translated: totalTranslated };

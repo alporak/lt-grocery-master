@@ -1,9 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const ollamaUrl = req.nextUrl.searchParams.get("ollamaUrl") || "";
+
   const [
     totalProducts,
     categorizedCount,
@@ -52,6 +54,24 @@ export async function GET() {
     // groupBy may fail on older schemas
   }
 
+  // Check Ollama health if URL provided
+  let ollamaHealth = null;
+  if (ollamaUrl) {
+    try {
+      const oRes = await fetch(`${embedderUrl}/ollama-health?url=${encodeURIComponent(ollamaUrl)}`, {
+        signal: AbortSignal.timeout(12000),
+        cache: "no-store",
+      });
+      if (oRes.ok) {
+        ollamaHealth = await oRes.json();
+      } else {
+        ollamaHealth = { status: "error", error: `Embedder returned ${oRes.status}` };
+      }
+    } catch {
+      ollamaHealth = { status: "error", error: "Could not reach embedder service" };
+    }
+  }
+
   return NextResponse.json({
     totalProducts,
     embeddingsCount,
@@ -59,5 +79,6 @@ export async function GET() {
     enrichedCount,
     embedderStatus,
     topCategories,
+    ollamaHealth,
   });
 }

@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
-import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Database, Sparkles, Check, AlertCircle, Loader2, Languages, Brain, RotateCcw } from "lucide-react";
+import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Database, Sparkles, Check, AlertCircle, Loader2, Languages, Brain, RotateCcw, Cpu, Wifi, WifiOff, Square } from "lucide-react";
 
 interface PipelineState {
   status: "idle" | "clearing" | "scraping" | "translating" | "enriching" | "done" | "error";
@@ -28,10 +28,168 @@ interface PipelineState {
   updatedAt?: string;
 }
 
+interface OllamaHealthStatus {
+  status: string;
+  models?: string[];
+  error?: string;
+}
+
 const PIPELINE_STEPS = ["clearing", "scraping", "translating", "enriching", "done"] as const;
 
 function isActive(status: string) {
   return ["clearing", "scraping", "translating", "enriching"].includes(status);
+}
+
+function OllamaSettings({
+  language, ollamaUrl, setOllamaUrl, ollamaModel, setOllamaModel,
+  useOllamaForBulk, setUseOllamaForBulk, ollamaStatus, setOllamaStatus,
+  testingOllama, setTestingOllama,
+}: {
+  language: string;
+  ollamaUrl: string;
+  setOllamaUrl: (v: string) => void;
+  ollamaModel: string;
+  setOllamaModel: (v: string) => void;
+  useOllamaForBulk: boolean;
+  setUseOllamaForBulk: (v: boolean) => void;
+  ollamaStatus: OllamaHealthStatus | null;
+  setOllamaStatus: (v: OllamaHealthStatus | null) => void;
+  testingOllama: boolean;
+  setTestingOllama: (v: boolean) => void;
+}) {
+  const modelCountThreshold = 3;
+
+  const testConnection = async () => {
+    setTestingOllama(true);
+    setOllamaStatus(null);
+    try {
+      const res = await fetch(`/api/enrichment-stats?ollamaUrl=${encodeURIComponent(ollamaUrl)}`);
+      const data = await res.json();
+      setOllamaStatus(data.ollamaHealth || { status: "error", error: "No response" });
+    } catch {
+      setOllamaStatus({ status: "error", error: "Failed to test connection" });
+    }
+    setTestingOllama(false);
+  };
+
+  const hasModels = ollamaStatus?.models && ollamaStatus.models.length !== 0;
+  const extraModels = hasModels ? ollamaStatus!.models!.length - modelCountThreshold : 0;
+
+  return (
+    <>
+      {/* Ollama URL */}
+      <div className="space-y-1.5">
+        <label className="text-sm font-medium">
+          {language === "lt" ? "Ollama adresas" : "Ollama URL"}
+        </label>
+        <Input
+          placeholder="http://192.168.1.x:11434"
+          value={ollamaUrl}
+          onChange={(e) => setOllamaUrl(e.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">
+          {language === "lt"
+            ? 'Paleiskite "ollama serve" savo Mac ir naudokite vietini IP adresa'
+            : 'Run "ollama serve" on your Mac and use its local IP address'}
+        </p>
+      </div>
+
+      {/* Model selector */}
+      <div className="space-y-1.5">
+        <label className="text-sm font-medium">
+          {language === "lt" ? "Modelis" : "Model"}
+        </label>
+        <Select value={ollamaModel} onValueChange={setOllamaModel}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="llama3.1:8b">
+              llama3.1:8b (~8 GB{" \u2014 "}{language === "lt" ? "Groq atitikmuo, greitas" : "Groq-equivalent, fast"})
+            </SelectItem>
+            <SelectItem value="gemma4:e2b">
+              gemma4:e2b (~7 GB{" \u2014 "}{language === "lt" ? "greitas, lengvos užduotys" : "fast, lightweight tasks"})
+            </SelectItem>
+            <SelectItem value="gemma4:e4b">
+              gemma4:e4b (~10 GB{" \u2014 "}{language === "lt" ? "rekomenduojamas" : "recommended"})
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Use for bulk toggle */}
+      <button
+        onClick={() => setUseOllamaForBulk(!useOllamaForBulk)}
+        className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors w-full ${
+          useOllamaForBulk
+            ? "border-primary bg-primary/10"
+            : "border-border hover:border-primary/50"
+        }`}
+      >
+        <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
+          useOllamaForBulk ? "bg-primary text-primary-foreground" : "bg-muted"
+        }`}>
+          <Cpu className="h-4 w-4" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium">
+            {language === "lt" ? "Naudoti masiniam praturtinimui" : "Use for bulk enrichment"}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {language === "lt"
+              ? "Vertimas ir praturtinimas naudos Ollama vietoj Groq"
+              : "Translation & enrichment phases will use Ollama instead of Groq"}
+          </p>
+        </div>
+        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+          useOllamaForBulk ? "border-primary bg-primary" : "border-muted-foreground/30"
+        }`}>
+          {useOllamaForBulk && <Check className="h-3 w-3 text-primary-foreground" />}
+        </div>
+      </button>
+
+      {/* Test Connection */}
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!ollamaUrl || testingOllama}
+          onClick={testConnection}
+          className="gap-2"
+        >
+          {testingOllama ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Wifi className="h-3 w-3" />
+          )}
+          {language === "lt" ? "Tikrinti rysi" : "Test Connection"}
+        </Button>
+
+        {ollamaStatus && (
+          <div className={`flex items-center gap-1.5 text-xs ${
+            ollamaStatus.status === "ok" ? "text-green-600" : "text-destructive"
+          }`}>
+            {ollamaStatus.status === "ok" ? (
+              <>
+                <Wifi className="h-3 w-3" />
+                <span>
+                  {language === "lt" ? "Prisijungta" : "Connected"}
+                  {hasModels && (
+                    <>{" \u2014 "}{ollamaStatus.models!.slice(0, modelCountThreshold).join(", ")}{extraModels >= 1 ? ` +${extraModels}` : ""}</>
+                  )}
+                </span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3 w-3" />
+                <span>{ollamaStatus.error || (language === "lt" ? "Nepavyko prisijungti" : "Connection failed")}</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
 }
 
 export default function SettingsPage() {
@@ -44,8 +202,16 @@ export default function SettingsPage() {
   const [scrapingLocations, setScrapingLocations] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineState>({ status: "idle" });
   const [triggering, setTriggering] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [selectedPhases, setSelectedPhases] = useState<Set<string>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Ollama / local enrichment state
+  const [ollamaUrl, setOllamaUrl] = useState("");
+  const [ollamaModel, setOllamaModel] = useState("llama3.1:8b");
+  const [useOllamaForBulk, setUseOllamaForBulk] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaHealthStatus | null>(null);
+  const [testingOllama, setTestingOllama] = useState(false);
 
   const fetchPipelineStatus = useCallback(async () => {
     try {
@@ -67,6 +233,9 @@ export default function SettingsPage() {
         if (s.address) setAddress(s.address);
         if (s.scrapeIntervalHours) setScrapeInterval(String(s.scrapeIntervalHours));
         if (s.priceRetentionDays) setRetention(String(s.priceRetentionDays));
+        if (s.ollamaUrl) setOllamaUrl(s.ollamaUrl);
+        if (s.ollamaModel) setOllamaModel(s.ollamaModel);
+        if (s.useOllamaForBulk === true) setUseOllamaForBulk(true);
       })
       .catch(() => {});
 
@@ -101,6 +270,9 @@ export default function SettingsPage() {
         address,
         scrapeIntervalHours: parseInt(scrapeInterval, 10),
         priceRetentionDays: parseInt(retention, 10),
+        ollamaUrl,
+        ollamaModel,
+        useOllamaForBulk,
       }),
     });
     setSaved(true);
@@ -122,6 +294,19 @@ export default function SettingsPage() {
       }
     } catch { /* ignore */ }
     setTriggering(false);
+  };
+
+  const stopAll = async () => {
+    setStopping(true);
+    try {
+      await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop-all" }),
+      });
+      await fetchPipelineStatus();
+    } catch { /* ignore */ }
+    setStopping(false);
   };
 
   const togglePhase = (phase: string) => {
@@ -322,6 +507,36 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* Local Enrichment (Ollama) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Cpu className="h-5 w-5" />
+            {language === "lt" ? "Vietinis praturtinimas (Ollama)" : "Local Enrichment (Ollama)"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {language === "lt"
+              ? "Naudokite Ollama savo Mac kompiuteryje nemokamam masiniam praturtinimui."
+              : "Run Ollama on your Mac for free bulk enrichment. Daily scraping uses Groq (cloud)."}
+          </p>
+          <OllamaSettings
+            language={language}
+            ollamaUrl={ollamaUrl}
+            setOllamaUrl={setOllamaUrl}
+            ollamaModel={ollamaModel}
+            setOllamaModel={setOllamaModel}
+            useOllamaForBulk={useOllamaForBulk}
+            setUseOllamaForBulk={setUseOllamaForBulk}
+            ollamaStatus={ollamaStatus}
+            setOllamaStatus={setOllamaStatus}
+            testingOllama={testingOllama}
+            setTestingOllama={setTestingOllama}
+          />
+        </CardContent>
+      </Card>
+
       {/* Pipeline Phases */}
       <Card className={pipelineActive ? "border-primary" : pipelineError ? "border-destructive" : ""}>
         <CardHeader>
@@ -408,6 +623,26 @@ export default function SettingsPage() {
                   </p>
                 )}
               </div>
+
+              {/* Stop All button */}
+              {pipelineActive && (
+                <Button
+                  onClick={stopAll}
+                  disabled={stopping}
+                  variant="destructive"
+                  className="w-full gap-2"
+                  size="sm"
+                >
+                  {stopping ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Square className="h-4 w-4" />
+                  )}
+                  {stopping
+                    ? (language === "lt" ? "Stabdoma..." : "Stopping...")
+                    : (language === "lt" ? "Stabdyti viską" : "Stop all")}
+                </Button>
+              )}
             </div>
           )}
 

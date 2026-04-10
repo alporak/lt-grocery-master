@@ -39,6 +39,13 @@ GROQ_REQUEST_INTERVAL = 1.0  # seconds between API calls
 CATEGORIES_PATH = Path(__file__).parent / "categories.json"
 EXPORT_PATH = DATA_DIR / "product-intelligence.json.gz"
 
+# --- Ollama (local LLM) config ---
+OLLAMA_URL = os.getenv("OLLAMA_URL", "")  # e.g. http://192.168.1.100:11434
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_BATCH_SIZE = int(os.getenv("OLLAMA_BATCH_SIZE", "20"))
+OLLAMA_CHUNK_SIZE = int(os.getenv("OLLAMA_CHUNK_SIZE", "30"))
+OLLAMA_PARALLEL_REQUESTS = int(os.getenv("OLLAMA_PARALLEL_REQUESTS", "2"))
+
 # --- Global state ---
 model = None  # SentenceTransformer, loaded at startup
 embeddings: Optional[np.ndarray] = None  # shape (N, 384)
@@ -148,6 +155,71 @@ class TranslateBatchRequest(BaseModel):
     texts: list[str]
     source: str = "lt"
     target: str = "en"
+    provider: str = "groq"       # "groq" or "ollama"
+    ollama_url: str = ""
+    ollama_model: str = ""
+
+
+async def _llm_chat(
+    client: httpx.AsyncClient,
+    *,
+    provider: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 4000,
+    json_mode: bool = True,
+    ollama_url: str = "",
+    ollama_model: str = "",
+) -> dict | None:
+    """Unified LLM chat call for Groq or Ollama (OpenAI-compatible API).
+    Returns parsed JSON content dict, or None on error."""
+    if provider == "ollama":
+        base_url = (ollama_url or OLLAMA_URL).rstrip("/")
+        model_name = ollama_model or OLLAMA_MODEL
+        url = f"{base_url}/v1/chat/completions"
+        headers = {"Content-Type": "application/json"}
+    else:
+        if not GROQ_API_KEY:
+            return None
+        url = GROQ_URL
+        model_name = GROQ_MODEL
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+    payload: dict = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    try:
+        resp = await client.post(url, json=payload, headers=headers)
+
+        if resp.status_code == 429:
+            retry_after = min(float(resp.headers.get("retry-after", "10")) + 2, 30.0)
+            log.warning(f"[LLM:{provider}] Rate limited, waiting {retry_after}s")
+            await asyncio.sleep(retry_after)
+            resp = await client.post(url, json=payload, headers=headers)
+
+        if resp.status_code != 200:
+            log.warning(f"[LLM:{provider}] Returned {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        result = resp.json()
+        content = result["choices"][0]["message"]["content"]
+        return json.loads(content)
+
+    except Exception as e:
+        log.warning(f"[LLM:{provider}] Error: {e}")
+        return None
 
 
 # --- Endpoints ---
@@ -160,6 +232,27 @@ def health():
         "embeddings_count": len(product_ids),
         "categories_count": len(canonical_categories),
     }
+
+
+@app.get("/ollama-health")
+async def ollama_health(url: str = ""):
+    """Check Ollama connectivity and list available models."""
+    base_url = (url or OLLAMA_URL).rstrip("/")
+    if not base_url:
+        return {"status": "not_configured", "error": "No Ollama URL provided"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{base_url}/api/tags")
+            if resp.status_code != 200:
+                return {"status": "error", "error": f"Ollama returned {resp.status_code}", "url": base_url}
+            data = resp.json()
+            models = [m.get("name", "") for m in data.get("models", [])]
+            return {"status": "ok", "url": base_url, "models": models}
+    except httpx.ConnectError:
+        return {"status": "error", "error": "Cannot connect to Ollama — is it running?", "url": base_url}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "url": base_url}
 
 
 @app.post("/reset")
@@ -276,89 +369,98 @@ IMPORTANT rules:
 @app.post("/translate-batch")
 async def translate_batch(req: TranslateBatchRequest):
     """Translate product names using LLM for high-quality grocery translations."""
-    if not GROQ_API_KEY:
+    provider = req.provider or "groq"
+    is_ollama = provider == "ollama"
+
+    if not is_ollama and not GROQ_API_KEY:
         raise HTTPException(503, "GROQ_API_KEY not set — LLM translation unavailable")
+    if is_ollama and not (req.ollama_url or OLLAMA_URL):
+        raise HTTPException(503, "Ollama URL not configured")
 
     if len(req.texts) == 0:
         return {"translations": []}
 
-    # Process in chunks of 30 to stay within token limits
-    chunk_size = 30
-    all_translations: list[str] = []
+    chunk_size = OLLAMA_CHUNK_SIZE if is_ollama else 5
+    timeout = 600.0 if is_ollama else 120.0
+    all_translations: list[str] = [""] * len(req.texts)
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for chunk_start in range(0, len(req.texts), chunk_size):
-            chunk = req.texts[chunk_start:chunk_start + chunk_size]
+    async def process_chunk(client: httpx.AsyncClient, chunk_start: int, chunk: list[str]) -> None:
+        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(chunk))
+        user_prompt = f"Translate these {len(chunk)} Lithuanian grocery product names to English:\n\n{numbered}"
 
-            numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(chunk))
-            user_prompt = f"Translate these {len(chunk)} Lithuanian grocery product names to English:\n\n{numbered}"
+        data = await _llm_chat(
+            client,
+            provider=provider,
+            system_prompt=TRANSLATE_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            max_tokens=1000 if not is_ollama else 8000,
+            ollama_url=req.ollama_url,
+            ollama_model=req.ollama_model,
+        )
 
-            try:
-                resp = await client.post(GROQ_URL, json={
-                    "model": GROQ_MODEL,
-                    "messages": [
-                        {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 4000,
-                    "response_format": {"type": "json_object"},
-                }, headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                })
+        if data is None:
+            log.warning(f"[Translate] {provider} returned no data, falling back to originals for chunk")
+            all_translations[chunk_start:chunk_start + len(chunk)] = chunk
+            return
 
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("retry-after", "5")) + 1
-                    log.warning(f"[Translate] Rate limited, waiting {retry_after}s")
-                    await asyncio.sleep(retry_after)
-                    # Retry this chunk
-                    resp = await client.post(GROQ_URL, json={
-                        "model": GROQ_MODEL,
-                        "messages": [
-                            {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 4000,
-                        "response_format": {"type": "json_object"},
-                    }, headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    })
+        translations = data.get("translations", [])
+        if not isinstance(translations, list):
+            log.warning(f"[Translate] {provider} returned non-list, falling back to originals for chunk")
+            all_translations[chunk_start:chunk_start + len(chunk)] = chunk
+            return
 
-                if resp.status_code != 200:
-                    log.warning(f"[Translate] Groq returned {resp.status_code}, falling back to originals for chunk")
-                    all_translations.extend(chunk)
-                    continue
+        # Accept partial results: use what we got, keep originals for the rest
+        if len(translations) != len(chunk):
+            log.info(f"[Translate] Got {len(translations)}/{len(chunk)} translations, using partial results")
+            for i in range(len(translations), len(chunk)):
+                translations.append(chunk[i])  # keep original for missing
 
-                result = resp.json()
-                content = result["choices"][0]["message"]["content"]
-                data = json.loads(content)
+        all_translations[chunk_start:chunk_start + len(chunk)] = translations[:len(chunk)]
 
-                translations = data.get("translations", [])
-                if not isinstance(translations, list) or len(translations) != len(chunk):
-                    log.warning(f"[Translate] Unexpected LLM response shape (got {len(translations) if isinstance(translations, list) else 'non-list'}, expected {len(chunk)}), falling back")
-                    all_translations.extend(chunk)
-                    continue
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if is_ollama and OLLAMA_PARALLEL_REQUESTS > 1:
+            sem = asyncio.Semaphore(OLLAMA_PARALLEL_REQUESTS)
 
-                all_translations.extend(translations)
+            async def run_with_limit(chunk_start: int, chunk: list[str]) -> None:
+                async with sem:
+                    await process_chunk(client, chunk_start, chunk)
 
-            except Exception as e:
-                log.warning(f"[Translate] Error on chunk: {e}")
-                all_translations.extend(chunk)  # fallback to originals
-
-            if chunk_start + chunk_size < len(req.texts):
-                await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+            tasks = []
+            for chunk_start in range(0, len(req.texts), chunk_size):
+                chunk = req.texts[chunk_start:chunk_start + chunk_size]
+                tasks.append(asyncio.create_task(run_with_limit(chunk_start, chunk)))
+            await asyncio.gather(*tasks)
+        else:
+            for chunk_start in range(0, len(req.texts), chunk_size):
+                chunk = req.texts[chunk_start:chunk_start + chunk_size]
+                await process_chunk(client, chunk_start, chunk)
+                if not is_ollama and chunk_start + chunk_size < len(req.texts):
+                    await asyncio.sleep(12.0)  # 6000 TPM limit: ~500 tokens/request, need 12s gap
 
     return {"translations": all_translations}
 
 
+class EnrichRequest(BaseModel):
+    provider: str = "groq"       # "groq" or "ollama"
+    ollama_url: str = ""
+    ollama_model: str = ""
+
+
 @app.post("/enrich")
-async def enrich():
-    """LLM-enrich products that have no enrichedAt timestamp, via Groq."""
-    if not GROQ_API_KEY:
+async def enrich(req: EnrichRequest | None = None):
+    """LLM-enrich products that have no enrichedAt timestamp."""
+    provider = (req.provider if req else None) or "groq"
+    is_ollama = provider == "ollama"
+    ollama_url = (req.ollama_url if req else "") or ""
+    ollama_model = (req.ollama_model if req else "") or ""
+
+    if not is_ollama and not GROQ_API_KEY:
         return {"enriched": 0, "message": "GROQ_API_KEY not set", "skipped": True}
+    if is_ollama and not (ollama_url or OLLAMA_URL):
+        return {"enriched": 0, "message": "Ollama URL not configured", "skipped": True}
+
+    batch_size = OLLAMA_BATCH_SIZE if is_ollama else GROQ_BATCH_SIZE
+    timeout = 600.0 if is_ollama else 60.0
 
     conn = get_db_rw()
     try:
@@ -369,71 +471,50 @@ async def enrich():
         if not rows:
             return {"enriched": 0, "message": "No products to enrich"}
 
-        log.info(f"[Enrich] Enriching {len(rows)} products via Groq ({GROQ_MODEL}), batch_size={GROQ_BATCH_SIZE}...")
+        log.info(f"[Enrich] Enriching {len(rows)} products via {provider} (batch_size={batch_size})...")
         enriched_count = 0
         failed_count = 0
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for batch_start in range(0, len(rows), GROQ_BATCH_SIZE):
-                batch = rows[batch_start:batch_start + GROQ_BATCH_SIZE]
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for batch_start in range(0, len(rows), batch_size):
+                batch = rows[batch_start:batch_start + batch_size]
 
                 product_lines = []
                 for i, row in enumerate(batch):
                     product_lines.append(f"Product {i+1}: {_build_product_text(row)}")
                 batch_prompt = "\n".join(product_lines)
 
-                try:
-                    resp = await client.post(GROQ_URL, json={
-                        "model": GROQ_MODEL,
-                        "messages": [
-                            {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
-                            {"role": "user", "content": batch_prompt},
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 4000,
-                        "response_format": {"type": "json_object"},
-                    }, headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    })
+                data = await _llm_chat(
+                    client,
+                    provider=provider,
+                    system_prompt=BULK_ENRICH_SYSTEM_PROMPT,
+                    user_prompt=batch_prompt,
+                    max_tokens=4000,
+                    ollama_url=ollama_url,
+                    ollama_model=ollama_model,
+                )
 
-                    if resp.status_code == 429:
-                        retry_after = float(resp.headers.get("retry-after", "10")) + 2
-                        log.warning(f"[Enrich] Rate limited, waiting {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        failed_count += len(batch)
-                        continue
-
-                    if resp.status_code != 200:
-                        log.warning(f"[Enrich] Groq returned {resp.status_code}")
-                        failed_count += len(batch)
-                        continue
-
-                    result = resp.json()
-                    content = result["choices"][0]["message"]["content"]
-                    data = json.loads(content)
-
-                    items = data.get("results") if isinstance(data, dict) else data
-                    if not isinstance(items, list):
-                        items = [data] if isinstance(data, dict) and "name_clean" in data else []
-
-                    for i, row in enumerate(batch):
-                        if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
-                            conn.execute(
-                                "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
-                                (json.dumps(items[i]), row["id"])
-                            )
-                            enriched_count += 1
-                        else:
-                            failed_count += 1
-
-                    conn.commit()
-
-                except Exception as e:
-                    log.warning(f"[Enrich] Error on batch: {e}")
+                if data is None:
                     failed_count += len(batch)
+                    continue
 
-                await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+                items = data.get("results") if isinstance(data, dict) else data
+                if not isinstance(items, list):
+                    items = [data] if isinstance(data, dict) and "name_clean" in data else []
+
+                for i, row in enumerate(batch):
+                    if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
+                        conn.execute(
+                            "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
+                            (json.dumps(items[i]), row["id"])
+                        )
+                        enriched_count += 1
+                    else:
+                        failed_count += 1
+
+                conn.commit()
+                if not is_ollama:
+                    await asyncio.sleep(GROQ_REQUEST_INTERVAL)
 
         log.info(f"[Enrich] Enriched {enriched_count}/{len(rows)} products ({failed_count} failed)")
 
@@ -445,8 +526,14 @@ async def enrich():
         conn.close()
 
 
+class ProcessRequest(BaseModel):
+    provider: str = "groq"
+    ollama_url: str = ""
+    ollama_model: str = ""
+
+
 @app.post("/process")
-async def process():
+async def process(req: ProcessRequest | None = None):
     """Full pipeline: embed new products → categorize → enrich → group → export."""
     results = {}
 
@@ -456,12 +543,19 @@ async def process():
     # Step 2: Categorize uncategorized products
     results["categorize"] = _categorize_new_products()
 
-    # Step 3: LLM enrichment via Groq (if API key is configured)
-    if GROQ_API_KEY:
-        enrich_result = await enrich()
+    # Step 3: LLM enrichment (provider determined by request or env)
+    provider = (req.provider if req else None) or "groq"
+    has_llm = (provider == "ollama" and (req and req.ollama_url or OLLAMA_URL)) or (provider == "groq" and GROQ_API_KEY)
+    if has_llm:
+        enrich_req = EnrichRequest(
+            provider=provider,
+            ollama_url=(req.ollama_url if req else "") or "",
+            ollama_model=(req.ollama_model if req else "") or "",
+        )
+        enrich_result = await enrich(enrich_req)
         results["enrich"] = enrich_result
     else:
-        results["enrich"] = {"skipped": True, "reason": "GROQ_API_KEY not set"}
+        results["enrich"] = {"skipped": True, "reason": f"No {provider} configuration available"}
 
     # Step 4: Group similar products
     results["group"] = _do_grouping()
@@ -493,6 +587,7 @@ _bulk_enrich_state = {
     "error": None,
     "started_at": None,
     "finished_at": None,
+    "provider": None,
 }
 
 BULK_ENRICH_SYSTEM_PROMPT = """You classify Lithuanian grocery products. For EACH product, return a JSON object.
@@ -512,17 +607,21 @@ Product 1: Rokiškio pienas 2.5% riebumo, 1L | Rokiškio milk 2.5% fat, 1L | Pie
 {"results":[{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{"type":"fresh","packaging":"carton"}}]}"""
 
 
-async def _bulk_enrich_worker(api_key: str, model: str):
-    """Background worker that enriches all un-enriched products via Groq in batches."""
+async def _bulk_enrich_worker(api_key: str, model: str, provider: str = "groq",
+                               ollama_url: str = "", ollama_model: str = ""):
+    """Background worker that enriches all un-enriched products in batches."""
     global _bulk_enrich_state
     state = _bulk_enrich_state
+    is_ollama = provider == "ollama"
+    batch_size = OLLAMA_BATCH_SIZE if is_ollama else GROQ_BATCH_SIZE
+    timeout = 600.0 if is_ollama else 60.0
 
     conn = get_db_rw()
 
     try:
         total = conn.execute("SELECT count(*) FROM Product WHERE enrichedAt IS NULL").fetchone()[0]
         state["total"] = total
-        log.info(f"[BulkEnrich] Starting: {total} products pending, batch_size={GROQ_BATCH_SIZE}")
+        log.info(f"[BulkEnrich] Starting: {total} products pending, provider={provider}, batch_size={batch_size}")
 
         if total == 0:
             state["running"] = False
@@ -530,11 +629,11 @@ async def _bulk_enrich_worker(api_key: str, model: str):
             conn.close()
             return
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             while state["running"]:
                 rows = conn.execute(
                     "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL LIMIT ?",
-                    (GROQ_BATCH_SIZE,)
+                    (batch_size,)
                 ).fetchall()
 
                 if not rows:
@@ -546,47 +645,18 @@ async def _bulk_enrich_worker(api_key: str, model: str):
                     product_lines.append(f"Product {i+1}: {_build_product_text(row)}")
                 batch_prompt = "\n".join(product_lines)
 
-                try:
-                    resp = await client.post(GROQ_URL, json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
-                            {"role": "user", "content": batch_prompt},
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 4000,
-                        "response_format": {"type": "json_object"},
-                    }, headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    })
+                if is_ollama:
+                    data = await _llm_chat(
+                        client,
+                        provider="ollama",
+                        system_prompt=BULK_ENRICH_SYSTEM_PROMPT,
+                        user_prompt=batch_prompt,
+                        max_tokens=4000,
+                        ollama_url=ollama_url,
+                        ollama_model=ollama_model,
+                    )
 
-                    if resp.status_code == 429:
-                        retry_after = float(resp.headers.get("retry-after", "10")) + 2
-                        log.warning(f"[BulkEnrich] Rate limited, waiting {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue  # retry same batch
-
-                    if resp.status_code == 401:
-                        state["error"] = "Invalid API key"
-                        state["running"] = False
-                        break
-
-                    if resp.status_code == 413:
-                        # Payload too large — mark batch as failed and continue
-                        log.warning(f"[BulkEnrich] 413 Payload Too Large for {len(rows)} products, marking as failed")
-                        for row in rows:
-                            conn.execute(
-                                "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
-                                (row["id"],)
-                            )
-                        conn.commit()
-                        state["failed"] += len(rows)
-                        await asyncio.sleep(GROQ_REQUEST_INTERVAL)
-                        continue
-
-                    if resp.status_code != 200:
-                        log.warning(f"[BulkEnrich] Groq returned {resp.status_code}")
+                    if data is None:
                         state["failed"] += len(rows)
                         for row in rows:
                             conn.execute(
@@ -594,43 +664,95 @@ async def _bulk_enrich_worker(api_key: str, model: str):
                                 (row["id"],)
                             )
                         conn.commit()
+                        await asyncio.sleep(0.5)
+                        continue
+                else:
+                    # Groq path (existing logic with API key auth)
+                    try:
+                        resp = await client.post(GROQ_URL, json={
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
+                                {"role": "user", "content": batch_prompt},
+                            ],
+                            "temperature": 0.1,
+                            "max_tokens": 4000,
+                            "response_format": {"type": "json_object"},
+                        }, headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        })
+
+                        if resp.status_code == 429:
+                            retry_after = float(resp.headers.get("retry-after", "10")) + 2
+                            log.warning(f"[BulkEnrich] Rate limited, waiting {retry_after}s")
+                            await asyncio.sleep(retry_after)
+                            continue  # retry same batch
+
+                        if resp.status_code == 401:
+                            state["error"] = "Invalid API key"
+                            state["running"] = False
+                            break
+
+                        if resp.status_code == 413:
+                            log.warning(f"[BulkEnrich] 413 Payload Too Large for {len(rows)} products, marking as failed")
+                            for row in rows:
+                                conn.execute(
+                                    "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
+                                    (row["id"],)
+                                )
+                            conn.commit()
+                            state["failed"] += len(rows)
+                            await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+                            continue
+
+                        if resp.status_code != 200:
+                            log.warning(f"[BulkEnrich] Groq returned {resp.status_code}")
+                            state["failed"] += len(rows)
+                            for row in rows:
+                                conn.execute(
+                                    "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
+                                    (row["id"],)
+                                )
+                            conn.commit()
+                            await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+                            continue
+
+                        result = resp.json()
+                        content = result["choices"][0]["message"]["content"]
+                        data = json.loads(content)
+
+                    except Exception as e:
+                        log.warning(f"[BulkEnrich] Error on batch: {e}")
+                        state["failed"] += len(rows)
+                        for row in rows:
+                            conn.execute(
+                                "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
+                                (row["id"],)
+                            )
+                        conn.commit()
                         await asyncio.sleep(GROQ_REQUEST_INTERVAL)
                         continue
 
-                    result = resp.json()
-                    content = result["choices"][0]["message"]["content"]
-                    data = json.loads(content)
+                # Parse results (shared by both paths)
+                items = data.get("results") if isinstance(data, dict) else data
+                if not isinstance(items, list):
+                    items = [data] if isinstance(data, dict) and "name_clean" in data else []
 
-                    # Handle both {"results": [...]} and direct array
-                    items = data.get("results") if isinstance(data, dict) else data
-                    if not isinstance(items, list):
-                        items = [data] if isinstance(data, dict) and "name_clean" in data else []
-
-                    for i, row in enumerate(rows):
-                        if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
-                            conn.execute(
-                                "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
-                                (json.dumps(items[i]), row["id"])
-                            )
-                            state["done"] += 1
-                        else:
-                            state["failed"] += 1
-
-                    conn.commit()
-                    log.info(f"[BulkEnrich] Progress: {state['done']}/{state['total']} done, {state['failed']} failed")
-
-                except Exception as e:
-                    log.warning(f"[BulkEnrich] Error on batch: {e}")
-                    state["failed"] += len(rows)
-                    for row in rows:
+                for i, row in enumerate(rows):
+                    if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
                         conn.execute(
-                            "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
-                            (row["id"],)
+                            "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
+                            (json.dumps(items[i]), row["id"])
                         )
-                    conn.commit()
+                        state["done"] += 1
+                    else:
+                        state["failed"] += 1
 
-                # 1 request per second
-                await asyncio.sleep(GROQ_REQUEST_INTERVAL)
+                conn.commit()
+                log.info(f"[BulkEnrich] Progress: {state['done']}/{state['total']} done, {state['failed']} failed")
+
+                await asyncio.sleep(0.5 if is_ollama else GROQ_REQUEST_INTERVAL)
 
     except Exception as e:
         state["error"] = str(e)
@@ -646,19 +768,27 @@ async def _bulk_enrich_worker(api_key: str, model: str):
 class BulkEnrichRequest(BaseModel):
     api_key: str = ""
     model: str = "llama-3.1-8b-instant"
+    provider: str = "groq"       # "groq" or "ollama"
+    ollama_url: str = ""
+    ollama_model: str = ""
 
 
 @app.post("/bulk-enrich")
 async def bulk_enrich(req: BulkEnrichRequest):
-    """Start bulk enrichment via Groq API. Runs in the background."""
+    """Start bulk enrichment. Runs in the background."""
     global _bulk_enrich_state
     if _bulk_enrich_state["running"]:
         return {"error": "Bulk enrichment already running"}, 409
 
-    # Use provided key or fall back to env var
-    api_key = req.api_key or GROQ_API_KEY
-    if not api_key:
-        return {"error": "No API key provided and GROQ_API_KEY not set"}
+    is_ollama = req.provider == "ollama"
+
+    if is_ollama:
+        if not (req.ollama_url or OLLAMA_URL):
+            return {"error": "Ollama URL not configured"}
+    else:
+        api_key = req.api_key or GROQ_API_KEY
+        if not api_key:
+            return {"error": "No API key provided and GROQ_API_KEY not set"}
 
     # Count pending
     conn = get_db()
@@ -673,10 +803,17 @@ async def bulk_enrich(req: BulkEnrichRequest):
         "error": None,
         "started_at": time.time(),
         "finished_at": None,
+        "provider": req.provider,
     }
 
-    asyncio.create_task(_bulk_enrich_worker(api_key, req.model))
-    return {"started": True, "total": total}
+    asyncio.create_task(_bulk_enrich_worker(
+        api_key=req.api_key or GROQ_API_KEY if not is_ollama else "",
+        model=req.model,
+        provider=req.provider,
+        ollama_url=req.ollama_url,
+        ollama_model=req.ollama_model,
+    ))
+    return {"started": True, "total": total, "provider": req.provider}
 
 
 @app.post("/bulk-enrich/stop")
