@@ -3,6 +3,18 @@ import { prisma } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
+export async function GET() {
+  const setting = await prisma.settings.findUnique({ where: { key: "pipelineState" } });
+  if (!setting?.value) {
+    return NextResponse.json({ status: "idle" });
+  }
+  try {
+    return NextResponse.json(JSON.parse(setting.value));
+  } catch {
+    return NextResponse.json({ status: "idle" });
+  }
+}
+
 async function doResetData() {
   // Wipe all scraped data: products, prices, scrape logs, groups, embeddings
   // Keep: stores, settings, grocery lists, scraper configs, store locations
@@ -214,11 +226,38 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "redo-database") {
+    const requestedAt = new Date();
+
+    // Set initial pipeline state
+    const initialState = {
+      trigger: "manual",
+      status: "clearing",
+      startedAt: requestedAt.toISOString(),
+      storesTotal: 0,
+      storesCompleted: 0,
+      productsScraped: 0,
+      currentStore: null,
+      finishedAt: null,
+      error: null,
+      updatedAt: requestedAt.toISOString(),
+    };
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: { value: JSON.stringify(initialState) },
+      create: { key: "pipelineState", value: JSON.stringify(initialState) },
+    });
+
     // 1) Reset existing scraped data
     const deleted = await doResetData();
 
-    // 2) Trigger scraper immediately via settings signal
-    const requestedAt = new Date();
+    // 2) Update pipeline state to scraping (waiting for scraper to pick up)
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: { value: JSON.stringify({ ...initialState, status: "scraping", updatedAt: new Date().toISOString() }) },
+      create: { key: "pipelineState", value: JSON.stringify({ ...initialState, status: "scraping" }) },
+    });
+
+    // 3) Trigger scraper immediately via settings signal
     await prisma.settings.upsert({
       where: { key: "scrapeRequested" },
       update: { value: requestedAt.toISOString() },
@@ -229,11 +268,6 @@ export async function POST(req: NextRequest) {
       success: true,
       deleted,
       requestedAt: requestedAt.toISOString(),
-      pipeline: {
-        scrapeTriggered: true,
-        enrichAfterScrape: true,
-        note: "Scraper runs in background; enrichment starts after scrape completes.",
-      },
     });
   }
 

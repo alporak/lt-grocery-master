@@ -1,6 +1,8 @@
 import { prisma } from "./db";
 import { normalizeText, buildSearchConditions, semanticSearch } from "./search";
 import { haversineDistance } from "./distance";
+import { computeLineCost } from "./cost";
+export { computeLineCost } from "./cost";
 
 interface CompareItem {
   itemName: string;
@@ -235,19 +237,7 @@ export async function compareGroceryList(
   return result;
 }
 
-/**
- * Compute the line cost for a matched product.
- * - matchType "pack" → the product IS a multi-pack; price already covers the quantity.
- * - matchType "unit" or undefined → single item; multiply by quantity.
- */
-export function computeLineCost(match: { price: number; salePrice?: number; loyaltyPrice?: number; matchType?: "pack" | "unit" }, quantity: number): number {
-  const bestPrice = Math.min(
-    match.price,
-    match.salePrice ?? Infinity,
-    match.loyaltyPrice ?? Infinity
-  );
-  return match.matchType === "pack" ? bestPrice : bestPrice * quantity;
-}
+// computeLineCost is re-exported from ./cost (browser-safe)
 
 /**
  * Find multiple candidate product matches for a grocery item in a specific store.

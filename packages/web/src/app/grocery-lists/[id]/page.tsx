@@ -32,7 +32,7 @@ import {
   Info,
 } from "lucide-react";
 import { parseItem, formatParsed } from "@/lib/parse-item";
-import { computeLineCost } from "@/lib/compare";
+import { computeLineCost } from "@/lib/cost";
 
 interface Suggestion {
   id: number;

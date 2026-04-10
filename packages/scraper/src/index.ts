@@ -136,6 +136,22 @@ async function main() {
           update: { value: requestedValue },
           create: { key: "scrapeRequestedHandled", value: requestedValue },
         });
+      } catch (err) {
+        // Mark pipeline as errored so the UI knows
+        try {
+          const existing = await prisma.settings.findUnique({ where: { key: "pipelineState" } });
+          const state = existing?.value ? JSON.parse(existing.value) : {};
+          state.status = "error";
+          state.error = err instanceof Error ? err.message : String(err);
+          state.finishedAt = new Date().toISOString();
+          state.updatedAt = new Date().toISOString();
+          await prisma.settings.upsert({
+            where: { key: "pipelineState" },
+            update: { value: JSON.stringify(state) },
+            create: { key: "pipelineState", value: JSON.stringify(state) },
+          });
+        } catch { /* best-effort */ }
+        throw err;
       } finally {
         running = false;
       }
