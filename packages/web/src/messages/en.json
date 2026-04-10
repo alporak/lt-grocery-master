@@ -100,7 +100,10 @@
     "vsAverage": "vs. average",
     "smartPick": "Smart",
     "smartDescription": "Factors in grocery cost, walking distance, and missing items to find the best overall store.",
-    "bestChoice": "Best choice"
+    "bestChoice": "Best choice",
+    "itemMatching": "Matched Products",
+    "storeRecommendations": "Store Recommendations",
+    "parsed": "Parsed"
   },
   "stores": {
     "title": "Stores",

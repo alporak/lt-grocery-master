@@ -30,6 +30,13 @@ sqlite3 "$DB" "SELECT enrichment FROM Product LIMIT 0;" 2>/dev/null || \
 sqlite3 "$DB" "SELECT enrichedAt FROM Product LIMIT 0;" 2>/dev/null || \
   sqlite3 "$DB" "ALTER TABLE Product ADD COLUMN enrichedAt DATETIME;" 2>&1 || true
 sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS Product_canonicalCategory_idx ON Product(canonicalCategory);" 2>&1 || true
+# Create ProductGroup table if missing
+sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS ProductGroup (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, nameEn TEXT, canonicalCategory TEXT, createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);" 2>&1 || true
+sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS ProductGroup_canonicalCategory_idx ON ProductGroup(canonicalCategory);" 2>&1 || true
+# Add productGroupId column to Product if missing
+sqlite3 "$DB" "SELECT productGroupId FROM Product LIMIT 0;" 2>/dev/null || \
+  sqlite3 "$DB" "ALTER TABLE Product ADD COLUMN productGroupId INTEGER REFERENCES ProductGroup(id);" 2>&1 || true
+sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS Product_productGroupId_idx ON Product(productGroupId);" 2>&1 || true
 # Enable WAL mode for concurrent access
 sqlite3 "$DB" "PRAGMA journal_mode=WAL;" 2>&1 || true
 echo "Schema migration done."

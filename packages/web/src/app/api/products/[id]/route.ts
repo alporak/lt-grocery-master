@@ -29,5 +29,49 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  return NextResponse.json(product);
+  // If product belongs to a group, include cross-store alternatives
+  let groupMembers: any[] = [];
+  if (product.productGroupId) {
+    const members = await prisma.product.findMany({
+      where: {
+        productGroupId: product.productGroupId,
+        id: { not: product.id },
+      },
+      include: {
+        store: { select: { id: true, name: true, chain: true } },
+        priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
+      },
+    });
+    groupMembers = members.map((m) => ({
+      id: m.id,
+      nameLt: m.nameLt,
+      nameEn: m.nameEn,
+      brand: m.brand,
+      weightValue: m.weightValue,
+      weightUnit: m.weightUnit,
+      imageUrl: m.imageUrl,
+      store: m.store,
+      price: m.priceRecords[0]
+        ? {
+            regular: m.priceRecords[0].regularPrice,
+            sale: m.priceRecords[0].salePrice,
+            loyalty: m.priceRecords[0].loyaltyPrice,
+            unit: m.priceRecords[0].unitPrice,
+            unitLabel: m.priceRecords[0].unitLabel,
+          }
+        : null,
+    }));
+    // Sort by cheapest effective price
+    groupMembers.sort((a: any, b: any) => {
+      const pa = a.price
+        ? Math.min(a.price.regular, a.price.sale ?? Infinity, a.price.loyalty ?? Infinity)
+        : Infinity;
+      const pb = b.price
+        ? Math.min(b.price.regular, b.price.sale ?? Infinity, b.price.loyalty ?? Infinity)
+        : Infinity;
+      return pa - pb;
+    });
+  }
+
+  return NextResponse.json({ ...product, groupMembers });
 }

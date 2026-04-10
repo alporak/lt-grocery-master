@@ -5,7 +5,11 @@ import { haversineDistance } from "./distance";
 interface CompareItem {
   itemName: string;
   quantity: number;
+  unit?: string;
 }
+
+// Units where qty > 1 means "find a multi-pack, not N single items"
+const PACK_UNITS = new Set(["pack", "bottle", "pcs"]);
 
 interface StoreMatch {
   productId: number;
@@ -14,6 +18,17 @@ interface StoreMatch {
   unitPrice?: number;
   salePrice?: number;
   loyaltyPrice?: number;
+  brand?: string;
+  weightValue?: number;
+  weightUnit?: string;
+  imageUrl?: string;
+  nameLt?: string;
+  nameEn?: string;
+  categoryLt?: string;
+  score?: number;
+  /** "pack" = this product already covers the full quantity (a multi-pack).
+   *  "unit" = single item, line cost = price × quantity. */
+  matchType?: "pack" | "unit";
 }
 
 interface StoreResult {
@@ -23,6 +38,7 @@ interface StoreResult {
   items: Array<{
     itemName: string;
     match: StoreMatch | null;
+    candidates: StoreMatch[];
     lineCost: number;
   }>;
   totalCost: number;
@@ -77,19 +93,15 @@ export async function compareGroceryList(
     const storeItems: StoreResult["items"] = [];
 
     for (const item of items) {
-      const match = await findBestMatch(store.id, item.itemName, language);
-      const bestPrice = match
-        ? Math.min(
-            match.price,
-            match.salePrice ?? Infinity,
-            match.loyaltyPrice ?? Infinity
-          )
-        : 0;
+      const candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit);
+      const match = candidates.length > 0 ? candidates[0] : null;
+      const lineCost = match ? computeLineCost(match, item.quantity) : 0;
 
       storeItems.push({
         itemName: item.itemName,
         match,
-        lineCost: match ? bestPrice * item.quantity : 0,
+        candidates,
+        lineCost,
       });
     }
 
@@ -224,123 +236,261 @@ export async function compareGroceryList(
 }
 
 /**
- * Fuzzy-match a grocery item name against products in a specific store.
+ * Compute the line cost for a matched product.
+ * - matchType "pack" → the product IS a multi-pack; price already covers the quantity.
+ * - matchType "unit" or undefined → single item; multiply by quantity.
+ */
+export function computeLineCost(match: { price: number; salePrice?: number; loyaltyPrice?: number; matchType?: "pack" | "unit" }, quantity: number): number {
+  const bestPrice = Math.min(
+    match.price,
+    match.salePrice ?? Infinity,
+    match.loyaltyPrice ?? Infinity
+  );
+  return match.matchType === "pack" ? bestPrice : bestPrice * quantity;
+}
+
+/**
+ * Find multiple candidate product matches for a grocery item in a specific store.
  * Uses semantic search first, falls back to keyword matching.
+ *
+ * When the item has a pack-type unit (pack, bottle, pcs) and quantity > 1,
+ * runs a dual-search strategy:
+ *   1. Search for "{name} {qty}-pack" / "{name} {qty} {unit}" → multi-pack matches (matchType: "pack")
+ *   2. Search for "{name}" → single-unit matches (matchType: "unit")
+ * Candidates are sorted by effective line cost so the cheapest option wins.
+ */
+async function findCandidates(
+  storeId: number,
+  itemName: string,
+  language: string,
+  limit: number = 5,
+  quantity: number = 1,
+  unit?: string,
+): Promise<StoreMatch[]> {
+  const isPackSearch = quantity > 1 && !!unit && PACK_UNITS.has(unit);
+
+  // Run both pack-specific and base searches when applicable
+  const packCandidates: StoreMatch[] = [];
+  const unitCandidates: StoreMatch[] = [];
+  const seenIds = new Set<number>();
+
+  const toMatch = (product: any, pr: any, score?: number, matchType?: "pack" | "unit"): StoreMatch => ({
+    productId: product.id,
+    productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
+    price: pr.regularPrice,
+    unitPrice: pr.unitPrice ?? undefined,
+    salePrice: pr.salePrice ?? undefined,
+    loyaltyPrice: pr.loyaltyPrice ?? undefined,
+    brand: product.brand ?? undefined,
+    weightValue: product.weightValue ?? undefined,
+    weightUnit: product.weightUnit ?? undefined,
+    imageUrl: product.imageUrl ?? undefined,
+    nameLt: product.nameLt,
+    nameEn: product.nameEn ?? undefined,
+    categoryLt: product.categoryLt ?? undefined,
+    score,
+    matchType,
+  });
+
+  if (isPackSearch) {
+    // Search 1: pack-specific queries  (e.g., "water 6 pack", "water 6-pack")
+    const packQueries = [
+      `${itemName} ${quantity} ${unit}`,
+      `${itemName} ${quantity}`,
+    ];
+
+    for (const pq of packQueries) {
+      const results = await semanticSearch(pq, limit, [storeId]);
+      if (results && results.length > 0) {
+        const valid = results.filter((r) => r.score >= 0.45);
+        if (valid.length > 0) {
+          const products = await prisma.product.findMany({
+            where: { id: { in: valid.map((r) => r.id) } },
+            include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
+          });
+          const productMap = new Map(products.map((p) => [p.id, p]));
+          for (const sr of valid) {
+            if (seenIds.has(sr.id)) continue;
+            const product = productMap.get(sr.id);
+            if (product && product.priceRecords[0]) {
+              // Verify it actually looks like a multi-pack (has quantity-like indicator in name)
+              const nameCheck = (product.nameLt + " " + (product.nameEn || "")).toLowerCase();
+              const qtyStr = String(Math.round(quantity));
+              const looksLikePack =
+                nameCheck.includes(`${qtyStr} `) ||
+                nameCheck.includes(`${qtyStr}x`) ||
+                nameCheck.includes(`x${qtyStr}`) ||
+                nameCheck.includes(`${qtyStr}-`) ||
+                nameCheck.includes(`${qtyStr}vnt`) ||
+                nameCheck.includes(`${qtyStr}pak`);
+
+              if (looksLikePack) {
+                packCandidates.push(toMatch(product, product.priceRecords[0], sr.score, "pack"));
+                seenIds.add(product.id);
+              }
+            }
+          }
+        }
+      }
+      if (packCandidates.length >= limit) break;
+    }
+  }
+
+  // Search 2 (or only search): base item name
+  const baseCandidates = await _searchByName(storeId, itemName, language, limit * 2, seenIds);
+  for (const c of baseCandidates) {
+    unitCandidates.push({ ...c, matchType: isPackSearch ? "unit" : undefined });
+  }
+
+  // Merge and sort by effective line cost
+  const all = [...packCandidates, ...unitCandidates];
+  all.sort((a, b) => {
+    const costA = computeLineCost(a, quantity);
+    const costB = computeLineCost(b, quantity);
+    // Prefer matches with a cost > 0 (found products) over zero-cost
+    if (costA === 0 && costB > 0) return 1;
+    if (costB === 0 && costA > 0) return -1;
+    return costA - costB;
+  });
+
+  return all.slice(0, limit);
+}
+
+/**
+ * Core name-based search (semantic + keyword fallback).
+ */
+async function _searchByName(
+  storeId: number,
+  itemName: string,
+  language: string,
+  limit: number,
+  seenIds: Set<number>,
+): Promise<StoreMatch[]> {
+  const candidates: StoreMatch[] = [];
+
+  const toMatch = (product: any, pr: any, score?: number): StoreMatch => ({
+    productId: product.id,
+    productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
+    price: pr.regularPrice,
+    unitPrice: pr.unitPrice ?? undefined,
+    salePrice: pr.salePrice ?? undefined,
+    loyaltyPrice: pr.loyaltyPrice ?? undefined,
+    brand: product.brand ?? undefined,
+    weightValue: product.weightValue ?? undefined,
+    weightUnit: product.weightUnit ?? undefined,
+    imageUrl: product.imageUrl ?? undefined,
+    nameLt: product.nameLt,
+    nameEn: product.nameEn ?? undefined,
+    categoryLt: product.categoryLt ?? undefined,
+    score,
+  });
+
+  // Try semantic search first
+  const semanticResults = await semanticSearch(itemName, limit, [storeId]);
+  if (semanticResults && semanticResults.length > 0) {
+    const validResults = semanticResults.filter((r) => r.score >= 0.4);
+    if (validResults.length > 0) {
+      const products = await prisma.product.findMany({
+        where: { id: { in: validResults.map((r) => r.id) } },
+        include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
+      });
+      const productMap = new Map(products.map((p) => [p.id, p]));
+      for (const sr of validResults) {
+        if (seenIds.has(sr.id)) continue;
+        const product = productMap.get(sr.id);
+        if (product && product.priceRecords[0]) {
+          candidates.push(toMatch(product, product.priceRecords[0], sr.score));
+          seenIds.add(product.id);
+        }
+      }
+    }
+  }
+
+  // Keyword fallback
+  if (candidates.length < limit) {
+    const normalized = normalizeText(itemName);
+    const words = normalized.split(/\s+/).filter((w) => w.length > 2);
+    if (words.length > 0) {
+      const products = await prisma.product.findMany({
+        where: {
+          storeId,
+          id: { notIn: Array.from(seenIds) },
+          AND: words.map((word) => ({
+            OR: [
+              { searchIndex: { contains: word } },
+              { nameLt: { contains: word } },
+              { nameEn: { contains: word } },
+            ],
+          })),
+        },
+        include: {
+          priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
+        },
+        take: limit * 2,
+      });
+
+      const scored = products.map((p) => {
+        const name = normalizeText(language === "en" ? p.nameEn || p.nameLt : p.nameLt);
+        const similarity = calculateSimilarity(normalized, name);
+        return { product: p, similarity };
+      });
+      scored.sort((a, b) => b.similarity - a.similarity);
+
+      for (const { product, similarity } of scored) {
+        if (candidates.length >= limit) break;
+        if (seenIds.has(product.id)) continue;
+        const pr = product.priceRecords[0];
+        if (!pr) continue;
+        candidates.push(toMatch(product, pr, similarity));
+        seenIds.add(product.id);
+      }
+    }
+
+    // Single-word fallback
+    if (candidates.length === 0) {
+      const normalized = normalizeText(itemName);
+      const words = normalized.split(/\s+/).filter((w) => w.length > 2);
+      if (words.length > 0) {
+        const fallback = await prisma.product.findMany({
+          where: {
+            storeId,
+            OR: [
+              { searchIndex: { contains: words[0] } },
+              { nameLt: { contains: words[0] } },
+              { nameEn: { contains: words[0] } },
+            ],
+          },
+          include: {
+            priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
+          },
+          take: limit,
+        });
+
+        for (const product of fallback) {
+          if (candidates.length >= limit) break;
+          if (seenIds.has(product.id)) continue;
+          const pr = product.priceRecords[0];
+          if (!pr) continue;
+          candidates.push(toMatch(product, pr));
+          seenIds.add(product.id);
+        }
+      }
+    }
+  }
+
+  return candidates.slice(0, limit);
+}
+
+/**
+ * Legacy single-match wrapper.
  */
 async function findBestMatch(
   storeId: number,
   itemName: string,
   language: string
 ): Promise<StoreMatch | null> {
-  // Try semantic search first
-  const semanticResults = await semanticSearch(itemName, 5, [storeId]);
-  if (semanticResults && semanticResults.length > 0) {
-    // Pick the best match above a similarity threshold
-    const best = semanticResults[0];
-    if (best.score >= 0.4) {
-      const product = await prisma.product.findUnique({
-        where: { id: best.id },
-        include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
-      });
-      if (product && product.priceRecords[0]) {
-        const pr = product.priceRecords[0];
-        return {
-          productId: product.id,
-          productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
-          price: pr.regularPrice,
-          unitPrice: pr.unitPrice ?? undefined,
-          salePrice: pr.salePrice ?? undefined,
-          loyaltyPrice: pr.loyaltyPrice ?? undefined,
-        };
-      }
-    }
-  }
-
-  // Fallback: keyword matching
-  const normalized = normalizeText(itemName);
-  const words = normalized.split(/\s+/).filter((w) => w.length > 2);
-  if (words.length === 0) return null;
-
-  // Use searchIndex (diacritics-normalized) + name fields for matching
-  const products = await prisma.product.findMany({
-    where: {
-      storeId,
-      AND: words.map((word) => ({
-        OR: [
-          { searchIndex: { contains: word } },
-          { nameLt: { contains: word } },
-          { nameEn: { contains: word } },
-        ],
-      })),
-    },
-    include: {
-      priceRecords: {
-        orderBy: { scrapedAt: "desc" },
-        take: 1,
-      },
-    },
-    take: 10,
-  });
-
-  if (products.length === 0) {
-    // Fallback: try with just the first significant word
-    const fallback = await prisma.product.findMany({
-      where: {
-        storeId,
-        OR: [
-          { searchIndex: { contains: words[0] } },
-          { nameLt: { contains: words[0] } },
-          { nameEn: { contains: words[0] } },
-        ],
-      },
-      include: {
-        priceRecords: {
-          orderBy: { scrapedAt: "desc" },
-          take: 1,
-        },
-      },
-      take: 5,
-    });
-
-    if (fallback.length === 0) return null;
-
-    const best = fallback[0];
-    const pr = best.priceRecords[0];
-    if (!pr) return null;
-
-    return {
-      productId: best.id,
-      productName: language === "en" ? best.nameEn || best.nameLt : best.nameLt,
-      price: pr.regularPrice,
-      unitPrice: pr.unitPrice ?? undefined,
-      salePrice: pr.salePrice ?? undefined,
-      loyaltyPrice: pr.loyaltyPrice ?? undefined,
-    };
-  }
-
-  // Pick the product whose name is closest to the search term
-  const scored = products.map((p) => {
-    const name = normalizeText(
-      language === "en" ? p.nameEn || p.nameLt : p.nameLt
-    );
-    const similarity = calculateSimilarity(normalized, name);
-    return { product: p, similarity };
-  });
-
-  scored.sort((a, b) => b.similarity - a.similarity);
-
-  const best = scored[0].product;
-  const pr = best.priceRecords[0];
-  if (!pr) return null;
-
-  return {
-    productId: best.id,
-    productName: language === "en" ? best.nameEn || best.nameLt : best.nameLt,
-    price: pr.regularPrice,
-    unitPrice: pr.unitPrice ?? undefined,
-    salePrice: pr.salePrice ?? undefined,
-    loyaltyPrice: pr.loyaltyPrice ?? undefined,
-  };
+  const candidates = await findCandidates(storeId, itemName, language, 1);
+  return candidates[0] || null;
 }
 
 function calculateSimilarity(a: string, b: string): number {

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/components/i18n-provider";
 import { ArrowLeft } from "lucide-react";
+import Link from "next/link";
 import {
   LineChart,
   Line,
@@ -43,6 +44,25 @@ interface ProductDetail {
   productUrl: string | null;
   store: { id: number; name: string; chain: string };
   priceRecords: PriceRecord[];
+  groupMembers?: GroupMember[];
+}
+
+interface GroupMember {
+  id: number;
+  nameLt: string;
+  nameEn: string | null;
+  brand: string | null;
+  weightValue: number | null;
+  weightUnit: string | null;
+  imageUrl: string | null;
+  store: { id: number; name: string; chain: string };
+  price: {
+    regular: number;
+    sale: number | null;
+    loyalty: number | null;
+    unit: number | null;
+    unitLabel: string | null;
+  } | null;
 }
 
 export default function ProductDetailPage() {
@@ -71,6 +91,14 @@ export default function ProductDetailPage() {
   const name = language === "en" ? product.nameEn || product.nameLt : product.nameLt;
   const category = language === "en" ? product.categoryEn || product.categoryLt : product.categoryLt;
   const latestPrice = product.priceRecords[product.priceRecords.length - 1];
+
+  const chainColor: Record<string, string> = {
+    IKI: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
+    MAXIMA: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
+    BARBORA: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
+    RIMI: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
+    PROMO: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
+  };
 
   const chartData = product.priceRecords.map((pr) => ({
     date: new Date(pr.scrapedAt).toLocaleDateString(),
@@ -230,6 +258,79 @@ export default function ProductDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Cross-store comparison */}
+      {product.groupMembers && product.groupMembers.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">{t("products.compareAcrossStores")}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {product.groupMembers.map((m) => {
+                const effectivePrice = m.price
+                  ? Math.min(
+                      m.price.regular,
+                      m.price.sale ?? Infinity,
+                      m.price.loyalty ?? Infinity
+                    )
+                  : null;
+                return (
+                  <Link
+                    key={m.id}
+                    href={`/products/${m.id}`}
+                    className="flex items-center gap-3 p-3 rounded-lg border hover:bg-accent/50 transition-colors"
+                  >
+                    {m.imageUrl && (
+                      <img
+                        src={m.imageUrl}
+                        alt=""
+                        className="w-10 h-10 object-contain rounded shrink-0"
+                      />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {language === "en" ? m.nameEn || m.nameLt : m.nameLt}
+                      </p>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Badge
+                          className={`text-xs ${chainColor[m.store.chain] || ""}`}
+                          variant="secondary"
+                        >
+                          {m.store.name}
+                        </Badge>
+                        {m.brand && <span>{m.brand}</span>}
+                        {m.weightValue && m.weightUnit && (
+                          <span>{m.weightValue}{m.weightUnit}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      {effectivePrice != null ? (
+                        <>
+                          <p className="text-sm font-bold">{effectivePrice.toFixed(2)}€</p>
+                          {m.price?.sale && m.price.sale < m.price.regular && (
+                            <p className="text-[10px] line-through text-muted-foreground">
+                              {m.price.regular.toFixed(2)}€
+                            </p>
+                          )}
+                          {m.price?.unit && m.price.unitLabel && (
+                            <p className="text-[10px] text-muted-foreground">
+                              {m.price.unit.toFixed(2)} {m.price.unitLabel}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </div>
+                  </Link>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Price chart */}
       <Card>

@@ -29,6 +29,7 @@ export async function GET(req: NextRequest) {
         nameEn: true,
         weightValue: true,
         weightUnit: true,
+        productGroupId: true,
         store: { select: { name: true, chain: true } },
         priceRecords: {
           orderBy: { scrapedAt: "desc" },
@@ -42,9 +43,20 @@ export async function GET(req: NextRequest) {
     const scoreMap = new Map(semanticResults.map(r => [r.id, r.score]));
     products.sort((a, b) => (scoreMap.get(b.id) || 0) - (scoreMap.get(a.id) || 0));
 
-    // Deduplicate by normalized name, keeping cheapest
+    // Deduplicate by productGroupId (if available), fallback to normalized name, keeping cheapest
+    const seenGroups = new Set<number>();
     const seen = new Map<string, typeof products[0]>();
     for (const p of products) {
+      // If product has a group, deduplicate by group
+      if (p.productGroupId) {
+        if (seenGroups.has(p.productGroupId)) {
+          continue;
+        }
+        seenGroups.add(p.productGroupId);
+        const key = `group:${p.productGroupId}`;
+        seen.set(key, p);
+        continue;
+      }
       const key = normalizeText(p.nameLt);
       const existing = seen.get(key);
       if (!existing) {
@@ -96,6 +108,7 @@ export async function GET(req: NextRequest) {
       nameEn: true,
       weightValue: true,
       weightUnit: true,
+      productGroupId: true,
       store: { select: { name: true, chain: true } },
       priceRecords: {
         orderBy: { scrapedAt: "desc" },
@@ -103,13 +116,20 @@ export async function GET(req: NextRequest) {
         select: { regularPrice: true, salePrice: true, unitPrice: true, unitLabel: true },
       },
     },
-    take: limit * 4, // Fetch more to deduplicate by name
+    take: limit * 4,
     orderBy: { updatedAt: "desc" },
   });
 
-  // Deduplicate by normalized name, keeping cheapest
+  // Deduplicate by productGroupId (if available), fallback to normalized name, keeping cheapest
+  const seenGroups = new Set<number>();
   const seen = new Map<string, typeof products[0]>();
   for (const p of products) {
+    if (p.productGroupId) {
+      if (seenGroups.has(p.productGroupId)) continue;
+      seenGroups.add(p.productGroupId);
+      seen.set(`group:${p.productGroupId}`, p);
+      continue;
+    }
     const key = normalizeText(p.nameLt);
     const existing = seen.get(key);
     if (!existing) {

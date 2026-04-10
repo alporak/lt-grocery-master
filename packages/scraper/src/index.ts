@@ -16,6 +16,18 @@ async function getInterval(): Promise<number> {
 async function main() {
   console.log("[Scheduler] Starting scraper service...");
   let running = false;
+  let lastHandledRequest = "";
+
+  try {
+    const handled = await prisma.settings.findUnique({
+      where: { key: "scrapeRequestedHandled" },
+    });
+    if (handled?.value) {
+      lastHandledRequest = handled.value;
+    }
+  } catch {
+    // ignore, fallback to in-memory only
+  }
 
   // Clean up stale "running" logs from previous interrupted runs
   const staleCount = await prisma.scrapeLog.updateMany({
@@ -98,6 +110,37 @@ async function main() {
       }
     } catch (err) {
       console.error("[Scheduler] Error:", err);
+      running = false;
+    }
+  });
+
+  // Manual trigger: poll scrapeRequested every 30s
+  cron.schedule("*/30 * * * * *", async () => {
+    if (running) return;
+    try {
+      const req = await prisma.settings.findUnique({
+        where: { key: "scrapeRequested" },
+      });
+      const requestedValue = req?.value || "";
+      if (!requestedValue || requestedValue === lastHandledRequest) {
+        return;
+      }
+
+      running = true;
+      console.log(`[Scheduler] Manual scrape requested (${requestedValue}), running now...`);
+      try {
+        await runScrapeJob();
+        lastHandledRequest = requestedValue;
+        await prisma.settings.upsert({
+          where: { key: "scrapeRequestedHandled" },
+          update: { value: requestedValue },
+          create: { key: "scrapeRequestedHandled", value: requestedValue },
+        });
+      } finally {
+        running = false;
+      }
+    } catch (err) {
+      console.error("[Scheduler] Manual scrape trigger error:", err);
       running = false;
     }
   });

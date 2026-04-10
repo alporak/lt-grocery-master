@@ -55,17 +55,33 @@ model Product {
   canonicalCategory String? // embedder-assigned normalized category ID
   enrichment   String?   // JSON blob from LLM enrichment
   enrichedAt   DateTime? // when LLM enrichment was last run
+  productGroupId Int?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   store        Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
   priceRecords PriceRecord[]
+  productGroup ProductGroup? @relation(fields: [productGroupId], references: [id])
 
   @@unique([storeId, externalId])
   @@index([nameLt])
   @@index([categoryLt])
   @@index([storeId])
   @@index([searchIndex])
+  @@index([canonicalCategory])
+  @@index([productGroupId])
+}
+
+model ProductGroup {
+  id                Int      @id @default(autoincrement())
+  name              String
+  nameEn            String?
+  canonicalCategory String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  products Product[]
+
   @@index([canonicalCategory])
 }
 

@@ -100,7 +100,10 @@
     "vsAverage": "Lyginant su vidurkiu",
     "smartPick": "Protingas",
     "smartDescription": "Atsižvelgia į maisto kainą, ėjimo atstumą ir trūkstamas prekes, kad rastų geriausią parduotuvę.",
-    "bestChoice": "Geriausias pasirinkimas"
+    "bestChoice": "Geriausias pasirinkimas",
+    "itemMatching": "Surasti produktai",
+    "storeRecommendations": "Parduotuvių rekomendacijos",
+    "parsed": "Atpažinta"
   },
   "stores": {
     "title": "Parduotuvės",
