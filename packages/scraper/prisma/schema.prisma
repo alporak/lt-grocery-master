@@ -53,8 +53,10 @@ model Product {
   barcode      String?
   searchIndex  String?   // normalized lowercase no-diacritics name for search
   canonicalCategory String? // embedder-assigned normalized category ID
+  subcategory  String?   // more specific type within category (e.g. "sparkling water")
   enrichment   String?   // JSON blob from LLM enrichment
   enrichedAt   DateTime? // when LLM enrichment was last run
+  enrichmentVersion Int? // version of enrichment prompt used
   productGroupId Int?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -69,7 +71,9 @@ model Product {
   @@index([storeId])
   @@index([searchIndex])
   @@index([canonicalCategory])
+  @@index([subcategory])
   @@index([productGroupId])
+  @@index([brand])
 }
 
 model ProductGroup {
@@ -112,12 +116,14 @@ model GroceryList {
 }
 
 model GroceryListItem {
-  id       Int     @id @default(autoincrement())
-  listId   Int
-  itemName String
-  quantity Float   @default(1)
-  unit     String?
-  checked  Boolean @default(false)
+  id                   Int     @id @default(autoincrement())
+  listId               Int
+  itemName             String
+  quantity             Float   @default(1)
+  unit                 String?
+  checked              Boolean @default(false)
+  pinnedProductGroupId Int?    // if set, use this product group for comparison
+  preferredBrand       String? // brand preference for this item
 
   list GroceryList @relation(fields: [listId], references: [id], onDelete: Cascade)
 

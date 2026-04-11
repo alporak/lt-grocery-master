@@ -21,7 +21,11 @@ import {
   Plus,
   ShoppingBasket,
   Check,
+  Tag,
+  X,
 } from "lucide-react";
+import { BrandPickerModal } from "@/components/BrandPickerModal";
+import { getPreferredBrand, setPreferredBrand, clearPreferredBrand } from "@/lib/brandPreferences";
 
 interface Product {
   id: number;
@@ -67,6 +71,9 @@ export default function ProductsPage() {
   const [groceryLists, setGroceryLists] = useState<GroceryList[]>([]);
   const [addedProducts, setAddedProducts] = useState<Set<number>>(new Set());
   const [activeListId, setActiveListId] = useState<number | null>(null);
+  const [detectedCategory, setDetectedCategory] = useState<string | null>(null);
+  const [brandFilter, setBrandFilter] = useState<string | null>(null);
+  const [showBrandPicker, setShowBrandPicker] = useState(false);
 
   const fetchProducts = useCallback(() => {
     const params = new URLSearchParams({
@@ -77,12 +84,27 @@ export default function ProductsPage() {
     if (search) params.set("search", search);
     if (selectedStores.length > 0) params.set("storeIds", selectedStores.join(","));
     if (categoryFilter !== "all") params.set("category", categoryFilter);
+    if (brandFilter) params.set("brand", brandFilter);
 
     fetch(`/api/products?${params}`)
       .then((r) => r.json())
       .then(setData)
       .catch(() => {});
-  }, [page, search, selectedStores, categoryFilter, language]);
+
+    // Detect category from search query for brand picker
+    if (search && search.length >= 2) {
+      fetch(`/api/products/suggest?q=${encodeURIComponent(search)}&limit=6`)
+        .then((r) => r.json())
+        .then((d: { dominantCategory?: string | null }) => {
+          if (!Array.isArray(d)) {
+            setDetectedCategory(d.dominantCategory || null);
+          }
+        })
+        .catch(() => {});
+    } else {
+      setDetectedCategory(null);
+    }
+  }, [page, search, selectedStores, categoryFilter, language, brandFilter]);
 
   useEffect(() => {
     fetchProducts();
@@ -166,14 +188,40 @@ export default function ProductsPage() {
       <h1 className="text-3xl font-bold">{t("products.title")}</h1>
 
       {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          placeholder={t("products.searchPlaceholder")}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="pl-9 text-base h-11"
-        />
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder={t("products.searchPlaceholder")}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-9 text-base h-11"
+          />
+        </div>
+        {detectedCategory && (
+          <button
+            onClick={() => setShowBrandPicker(true)}
+            className={`flex items-center gap-1.5 px-3 h-11 rounded-md border text-sm font-medium transition-colors shrink-0 ${
+              brandFilter
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border hover:border-primary/50 text-muted-foreground"
+            }`}
+            title={language === "lt" ? "Pasirinkti prekės ženklą" : "Pick a brand"}
+          >
+            <Tag className="h-4 w-4" />
+            {brandFilter ? (
+              <span>
+                {brandFilter}
+                <X
+                  className="h-3 w-3 ml-1 inline-block"
+                  onClick={(e) => { e.stopPropagation(); setBrandFilter(null); clearPreferredBrand(detectedCategory); }}
+                />
+              </span>
+            ) : (
+              language === "lt" ? "Prekės ženklas" : "Brand"
+            )}
+          </button>
+        )}
       </div>
 
       {/* Store filter chips (multi-select) */}
@@ -373,6 +421,21 @@ export default function ProductsPage() {
             </div>
           )}
         </>
+      )}
+
+      {showBrandPicker && detectedCategory && (
+        <BrandPickerModal
+          categoryId={detectedCategory}
+          categoryName={detectedCategory}
+          currentBrand={brandFilter}
+          onSelect={(brand) => {
+            setBrandFilter(brand);
+            if (brand) setPreferredBrand(detectedCategory, brand);
+            else clearPreferredBrand(detectedCategory);
+            setPage(1);
+          }}
+          onClose={() => setShowBrandPicker(false)}
+        />
       )}
     </div>
   );

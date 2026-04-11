@@ -25,7 +25,8 @@
     "groceryLists": "Grocery Lists",
     "stores": "Stores",
     "scraper": "Web Scraper",
-    "settings": "Settings"
+    "settings": "Settings",
+    "categories": "Categories"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -142,7 +143,8 @@
   "theme": {
     "light": "Light",
     "dark": "Dark",
-    "saltibarscia": "Šaltibarščiai 🩷"  },
+    "saltibarscia": "Šaltibarščiai 🩷"
+  },
   "scraper": {
     "title": "Web Scraper",
     "description": "Define CSS selectors to scrape product data from any e-shop website. Test your selectors first, then run to import products.",

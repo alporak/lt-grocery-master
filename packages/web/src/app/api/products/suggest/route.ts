@@ -27,6 +27,8 @@ export async function GET(req: NextRequest) {
         id: true,
         nameLt: true,
         nameEn: true,
+        brand: true,
+        canonicalCategory: true,
         weightValue: true,
         weightUnit: true,
         productGroupId: true,
@@ -70,10 +72,21 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Detect dominant category among results (for brand picker)
+    const catCounts = new Map<string, number>();
+    for (const p of [...seen.values()]) {
+      if (p.canonicalCategory) catCounts.set(p.canonicalCategory, (catCounts.get(p.canonicalCategory) || 0) + 1);
+    }
+    const dominantCategory = catCounts.size > 0
+      ? [...catCounts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+      : null;
+
     const suggestions = [...seen.values()].slice(0, limit).map(p => ({
       id: p.id,
       name: p.nameLt,
       nameEn: p.nameEn,
+      brand: p.brand,
+      canonicalCategory: p.canonicalCategory,
       store: p.store.name,
       chain: p.store.chain,
       price: p.priceRecords[0]?.salePrice ?? p.priceRecords[0]?.regularPrice ?? null,
@@ -83,13 +96,13 @@ export async function GET(req: NextRequest) {
       weightUnit: p.weightUnit,
     }));
 
-    return NextResponse.json(suggestions);
+    return NextResponse.json({ suggestions, dominantCategory });
   }
 
   // Fallback: keyword search
   const normalized = normalizeText(q);
   const words = normalized.split(/\s+/).filter(w => w.length >= 2);
-  if (words.length === 0) return NextResponse.json([]);
+  if (words.length === 0) return NextResponse.json({ suggestions: [], dominantCategory: null });
 
   // Search by normalized index (diacritics-insensitive) and both name fields
   const products = await prisma.product.findMany({
@@ -106,6 +119,8 @@ export async function GET(req: NextRequest) {
       id: true,
       nameLt: true,
       nameEn: true,
+      brand: true,
+      canonicalCategory: true,
       weightValue: true,
       weightUnit: true,
       productGroupId: true,
@@ -121,32 +136,42 @@ export async function GET(req: NextRequest) {
   });
 
   // Deduplicate by productGroupId (if available), fallback to normalized name, keeping cheapest
-  const seenGroups = new Set<number>();
-  const seen = new Map<string, typeof products[0]>();
+  const seenGroups2 = new Set<number>();
+  const seen2 = new Map<string, typeof products[0]>();
   for (const p of products) {
     if (p.productGroupId) {
-      if (seenGroups.has(p.productGroupId)) continue;
-      seenGroups.add(p.productGroupId);
-      seen.set(`group:${p.productGroupId}`, p);
+      if (seenGroups2.has(p.productGroupId)) continue;
+      seenGroups2.add(p.productGroupId);
+      seen2.set(`group:${p.productGroupId}`, p);
       continue;
     }
     const key = normalizeText(p.nameLt);
-    const existing = seen.get(key);
+    const existing = seen2.get(key);
     if (!existing) {
-      seen.set(key, p);
+      seen2.set(key, p);
     } else {
       const existingPrice = existing.priceRecords[0]?.salePrice ?? existing.priceRecords[0]?.regularPrice ?? Infinity;
       const newPrice = p.priceRecords[0]?.salePrice ?? p.priceRecords[0]?.regularPrice ?? Infinity;
       if (newPrice < existingPrice) {
-        seen.set(key, p);
+        seen2.set(key, p);
       }
     }
   }
 
-  const suggestions = [...seen.values()].slice(0, limit).map(p => ({
+  const catCounts2 = new Map<string, number>();
+  for (const p of [...seen2.values()]) {
+    if (p.canonicalCategory) catCounts2.set(p.canonicalCategory, (catCounts2.get(p.canonicalCategory) || 0) + 1);
+  }
+  const dominantCategory2 = catCounts2.size > 0
+    ? [...catCounts2.entries()].sort((a, b) => b[1] - a[1])[0][0]
+    : null;
+
+  const suggestions2 = [...seen2.values()].slice(0, limit).map(p => ({
     id: p.id,
     name: p.nameLt,
     nameEn: p.nameEn,
+    brand: p.brand,
+    canonicalCategory: p.canonicalCategory,
     store: p.store.name,
     chain: p.store.chain,
     price: p.priceRecords[0]?.salePrice ?? p.priceRecords[0]?.regularPrice ?? null,
@@ -156,5 +181,5 @@ export async function GET(req: NextRequest) {
     weightUnit: p.weightUnit,
   }));
 
-  return NextResponse.json(suggestions);
+  return NextResponse.json({ suggestions: suggestions2, dominantCategory: dominantCategory2 });
 }

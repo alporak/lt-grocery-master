@@ -1,21 +1,23 @@
-const LIBRETRANSLATE_URL =
-  process.env.LIBRETRANSLATE_URL || "http://localhost:5000";
 const EMBEDDER_URL = process.env.EMBEDDER_URL || "http://localhost:8000";
 
-async function translateBatchLLM(
+export async function translateBatch(
   texts: string[],
   source = "lt",
   target = "en"
-): Promise<string[] | null> {
+): Promise<string[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
+
   try {
     const res = await fetch(`${EMBEDDER_URL}/translate-batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ texts, source, target }),
+      signal: controller.signal,
     });
     if (!res.ok) {
-      console.warn(`[Translate] LLM translation returned ${res.status}, falling back to LibreTranslate`);
-      return null;
+      console.warn(`[Translate] LLM translation returned ${res.status}, keeping original names`);
+      return texts;
     }
     const data = await res.json();
     if (
@@ -23,65 +25,15 @@ async function translateBatchLLM(
       Array.isArray(data.translations) &&
       data.translations.length === texts.length
     ) {
+      console.log(`[Translate] Translated ${texts.length} texts via LLM`);
       return data.translations;
     }
-    console.warn("[Translate] LLM translation returned unexpected shape, falling back");
-    return null;
+    console.warn("[Translate] LLM translation returned unexpected shape, keeping original names");
+    return texts;
   } catch (err) {
-    console.warn("[Translate] LLM translation unavailable, falling back to LibreTranslate:", err);
-    return null;
+    console.warn("[Translate] LLM translation failed, keeping original names:", err);
+    return texts;
+  } finally {
+    clearTimeout(timeout);
   }
-}
-
-async function translateBatchLibre(
-  texts: string[],
-  source = "lt",
-  target = "en"
-): Promise<string[]> {
-  const results: string[] = [];
-
-  const batchSize = 20;
-  for (let i = 0; i < texts.length; i += batchSize) {
-    const batch = texts.slice(i, i + batchSize);
-
-    const translations = await Promise.all(
-      batch.map(async (text) => {
-        try {
-          const res = await fetch(`${LIBRETRANSLATE_URL}/translate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ q: text, source, target, format: "text" }),
-          });
-          if (!res.ok) return text;
-          const data = await res.json();
-          return data.translatedText || text;
-        } catch {
-          return text;
-        }
-      })
-    );
-
-    results.push(...translations);
-
-    if (i + batchSize < texts.length) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-  }
-
-  return results;
-}
-
-export async function translateBatch(
-  texts: string[],
-  source = "lt",
-  target = "en"
-): Promise<string[]> {
-  // Try LLM translation first (higher quality), fall back to LibreTranslate
-  const llmResult = await translateBatchLLM(texts, source, target);
-  if (llmResult) {
-    console.log(`[Translate] Used LLM for ${texts.length} texts`);
-    return llmResult;
-  }
-  console.log(`[Translate] Using LibreTranslate for ${texts.length} texts`);
-  return translateBatchLibre(texts, source, target);
 }

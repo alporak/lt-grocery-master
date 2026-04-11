@@ -13,7 +13,7 @@ Endpoints:
   GET  /health        — readiness check
 """
 
-import json, gzip, base64, os, time, sqlite3, logging, asyncio
+import json, gzip, base64, os, time, sqlite3, logging, asyncio, unicodedata
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -37,7 +37,9 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_BATCH_SIZE = int(os.getenv("GROQ_BATCH_SIZE", "10"))
 GROQ_REQUEST_INTERVAL = 1.0  # seconds between API calls
 CATEGORIES_PATH = Path(__file__).parent / "categories.json"
+BRANDS_PATH = Path(__file__).parent / "brands.json"
 EXPORT_PATH = DATA_DIR / "product-intelligence.json.gz"
+ENRICH_VERSION = 2  # Increment to force re-enrichment of all products
 
 # --- Ollama (local LLM) config ---
 OLLAMA_URL = os.getenv("OLLAMA_URL", "")  # e.g. http://192.168.1.100:11434
@@ -59,6 +61,44 @@ product_ids: list[int] = []
 product_store_ids: list[int] = []  # parallel array: storeId for each product
 canonical_categories: list[dict] = []
 category_embeddings: Optional[np.ndarray] = None
+known_brands: list[dict] = []  # loaded from brands.json
+
+
+def _run_db_migrations():
+    """Add new columns to existing DB if they don't exist (idempotent)."""
+    conn = get_db_rw()
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(Product)").fetchall()}
+        migrations = [
+            ("subcategory", "TEXT"),
+            ("enrichmentVersion", "INTEGER"),
+        ]
+        for col, col_type in migrations:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE Product ADD COLUMN {col} {col_type}")
+                log.info(f"[Migration] Added column Product.{col}")
+        existing_gli = {row[1] for row in conn.execute("PRAGMA table_info(GroceryListItem)").fetchall()}
+        gli_migrations = [
+            ("pinnedProductGroupId", "INTEGER"),
+            ("preferredBrand", "TEXT"),
+        ]
+        for col, col_type in gli_migrations:
+            if col not in existing_gli:
+                conn.execute(f"ALTER TABLE GroceryListItem ADD COLUMN {col} {col_type}")
+                log.info(f"[Migration] Added column GroceryListItem.{col}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_brands():
+    global known_brands
+    if not BRANDS_PATH.exists():
+        log.warning("brands.json not found, skipping brand loading")
+        return
+    with open(BRANDS_PATH) as f:
+        known_brands = json.load(f)
+    log.info(f"Loaded {len(known_brands)} known brands")
 
 
 def get_db():
@@ -128,7 +168,9 @@ async def lifespan(app: FastAPI):
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL_NAME)
     log.info("Model loaded")
+    _run_db_migrations()
     load_categories()
+    load_brands()
     load_embeddings()
     # Auto-import if no embeddings but artifact exists
     if len(product_ids) == 0 and EXPORT_PATH.exists():
@@ -471,7 +513,9 @@ async def enrich(req: EnrichRequest | None = None):
     conn = get_db_rw()
     try:
         rows = conn.execute(
-            "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL LIMIT 500"
+            "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product "
+            "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ? LIMIT 500",
+            (ENRICH_VERSION,)
         ).fetchall()
 
         if not rows:
@@ -508,17 +552,12 @@ async def enrich(req: EnrichRequest | None = None):
                 if not isinstance(items, list):
                     items = [data] if isinstance(data, dict) and "name_clean" in data else []
 
-                for i, row in enumerate(batch):
-                    if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
-                        conn.execute(
-                            "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
-                            (json.dumps(items[i]), row["id"])
-                        )
-                        enriched_count += 1
-                    else:
-                        failed_count += 1
-
-                conn.commit()
+                _db_save_batch([dict(r) for r in batch], items)
+                enriched_count += sum(
+                    1 for i, row in enumerate(batch)
+                    if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]
+                )
+                failed_count += len(batch) - (len(items) if isinstance(items, list) else 0)
                 if not is_ollama:
                     await asyncio.sleep(GROQ_REQUEST_INTERVAL)
 
@@ -588,6 +627,97 @@ def import_data():
     return _do_import()
 
 
+@app.get("/categories-summary")
+def categories_summary():
+    """Return all canonical categories with product counts and distinct subcategories."""
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT canonicalCategory, subcategory, COUNT(*) as cnt
+            FROM Product
+            WHERE canonicalCategory IS NOT NULL
+            GROUP BY canonicalCategory, subcategory
+            ORDER BY canonicalCategory, cnt DESC
+        """).fetchall()
+
+        # Build map: category_id → { count, subcategories }
+        cat_map: dict[str, dict] = {}
+        for row in rows:
+            cat_id = row["canonicalCategory"]
+            sub = row["subcategory"]
+            cnt = row["cnt"]
+            if cat_id not in cat_map:
+                cat_map[cat_id] = {"count": 0, "subcategories": []}
+            cat_map[cat_id]["count"] += cnt
+            if sub:
+                cat_map[cat_id]["subcategories"].append({"name": sub, "count": cnt})
+
+        # Merge with category metadata
+        result = []
+        for cat in canonical_categories:
+            cid = cat["id"]
+            info = cat_map.get(cid, {"count": 0, "subcategories": []})
+            result.append({
+                "id": cid,
+                "en": cat["en"],
+                "lt": cat["lt"],
+                "count": info["count"],
+                "subcategories": info["subcategories"][:20],  # top 20 subcategories
+            })
+
+        return {"categories": result}
+    finally:
+        conn.close()
+
+
+@app.get("/category/{category_id}/brands")
+def category_brands(category_id: str):
+    """Return distinct brands for a category with product counts and price ranges."""
+    conn = get_db()
+    try:
+        rows = conn.execute("""
+            SELECT p.brand, p.subcategory, COUNT(DISTINCT p.id) as product_count,
+                   MIN(pr.regularPrice) as min_price, MAX(pr.regularPrice) as max_price,
+                   p.imageUrl
+            FROM Product p
+            LEFT JOIN PriceRecord pr ON pr.productId = p.id
+            WHERE p.canonicalCategory = ? AND p.brand IS NOT NULL
+            GROUP BY p.brand, p.subcategory
+            ORDER BY product_count DESC
+            LIMIT 50
+        """, (category_id,)).fetchall()
+
+        brands: dict[str, dict] = {}
+        for row in rows:
+            brand = row["brand"]
+            if brand not in brands:
+                brands[brand] = {
+                    "name": brand,
+                    "product_count": 0,
+                    "min_price": None,
+                    "max_price": None,
+                    "subcategories": [],
+                    "sample_image": row["imageUrl"],
+                }
+            brands[brand]["product_count"] += row["product_count"]
+            if row["min_price"] is not None:
+                brands[brand]["min_price"] = min(
+                    row["min_price"],
+                    brands[brand]["min_price"] or row["min_price"]
+                )
+            if row["max_price"] is not None:
+                brands[brand]["max_price"] = max(
+                    row["max_price"],
+                    brands[brand]["max_price"] or row["max_price"]
+                )
+            if row["subcategory"] and row["subcategory"] not in brands[brand]["subcategories"]:
+                brands[brand]["subcategories"].append(row["subcategory"])
+
+        return {"brands": sorted(brands.values(), key=lambda b: -b["product_count"])}
+    finally:
+        conn.close()
+
+
 # --- Bulk enrichment via Groq API ---
 # Runs as a background task so it survives client disconnects
 # --- Concurrent Multi-Provider Swarm (Llama 3.1 8B Edition) ---
@@ -603,52 +733,141 @@ _bulk_enrich_state = {
     "finished_at": None,
 }
 
-# 11 Different Endpoints, 1 Unified Model (Llama 3.1 8B Instruct)
-MULTI_PROVIDERS =[
-    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://api.groq.com/openai/v1/chat/completions",                "model": "llama-3.1-8b-instant",                         "rpm": 30, "json_mode": True},
-    {"name": "Cerebras",   "env": "CEREBRAS_API_KEY",   "url": "https://api.cerebras.ai/v1/chat/completions",                    "model": "llama3.1-8b",                                  "rpm": 30, "json_mode": True},
-    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY", "url": "https://openrouter.ai/api/v1/chat/completions",                  "model": "meta-llama/llama-3.1-8b-instruct:free",        "rpm": 20, "json_mode": False},
-    {"name": "NVIDIA NIM", "env": "NVIDIA_API_KEY",     "url": "https://integrate.api.nvidia.com/v1/chat/completions",           "model": "meta/llama-3.1-8b-instruct",                   "rpm": 40, "json_mode": False},
-    {"name": "SambaNova",  "env": "SAMBANOVA_API_KEY",  "url": "https://api.sambanova.ai/v1/chat/completions",                   "model": "Meta-Llama-3.1-8B-Instruct",                   "rpm": 30, "json_mode": True},
-    {"name": "Hyperbolic", "env": "HYPERBOLIC_API_KEY", "url": "https://api.hyperbolic.xyz/v1/chat/completions",                 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",        "rpm": 30, "json_mode": False},
-    {"name": "GitHub",     "env": "GITHUB_TOKEN",       "url": "https://models.inference.ai.azure.com/chat/completions",         "model": "Meta-Llama-3.1-8B-Instruct",                   "rpm": 15, "json_mode": True},
-    {"name": "Scaleway",   "env": "SCALEWAY_API_KEY",   "url": "https://api.scaleway.ai/v1/chat/completions",                    "model": "llama-3.1-8b-instruct",                        "rpm": 30, "json_mode": False},
-    {"name": "Nebius",     "env": "NEBIUS_API_KEY",     "url": "https://api.studio.nebius.ai/v1/chat/completions",               "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",        "rpm": 30, "json_mode": False},
-    {"name": "Novita",     "env": "NOVITA_API_KEY",     "url": "https://api.novita.ai/v3/openai/chat/completions",               "model": "meta-llama/llama-3.1-8b-instruct",             "rpm": 30, "json_mode": True},
-    {"name": "Fireworks",  "env": "FIREWORKS_API_KEY",  "url": "https://api.fireworks.ai/inference/v1/chat/completions",         "model": "accounts/fireworks/models/llama-v3p1-8b-instruct", "rpm": 30, "json_mode": True},
+# 11 Different Endpoints — upgraded to 70b-class models for maximum accuracy
+MULTI_PROVIDERS = [
+    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://api.groq.com/openai/v1/chat/completions",       "model": "llama-3.3-70b-versatile",              "rpm": 30, "json_mode": True},
+    {"name": "Groq2",      "env": "GROQ2_API_KEY",      "url": "https://api.groq.com/openai/v1/chat/completions",       "model": "llama-3.3-70b-versatile",              "rpm": 30, "json_mode": True},
+    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY", "url": "https://openrouter.ai/api/v1/chat/completions",         "model": "meta-llama/llama-3.3-70b-instruct:free","rpm": 20, "json_mode": False},
+    {"name": "NVIDIA NIM", "env": "NVIDIA_API_KEY",     "url": "https://integrate.api.nvidia.com/v1/chat/completions",  "model": "meta/llama-3.3-70b-instruct",          "rpm": 40, "json_mode": False},
+    {"name": "GitHub",     "env": "GITHUB_TOKEN",       "url": "https://models.inference.ai.azure.com/chat/completions","model": "Meta-Llama-3.1-405B-Instruct",         "rpm": 15, "json_mode": True},
 ]
 
-BULK_ENRICH_SYSTEM_PROMPT = """You classify Lithuanian grocery products. For EACH product, return a JSON object.
-When given multiple products, return a JSON object with a "results" array containing one object per product, in the same order.
+# Valid canonical category IDs — LLM must pick one of these
+_CATEGORY_IDS = [
+    "poultry","beef","pork","lamb","minced-meat","deli-meat","fish-seafood",
+    "milk","cheese","yogurt","butter-cream","cottage-cheese","eggs",
+    "bread","bakery","fruits","vegetables","salads-herbs","mushrooms","frozen-food",
+    "rice-grains","pasta","flour-baking","oil-vinegar","canned-food","sauces-condiments",
+    "snacks","sweets-chocolate","cereals","honey-jam",
+    "tea","coffee","juice","water","soda-soft-drinks","beer","wine","spirits",
+    "baby-food","pet-food","cleaning","laundry","paper-products","personal-care","health",
+    "ready-meals","spices","other",
+]
+_CATEGORY_IDS_SET = set(_CATEGORY_IDS)
 
-Each object must have:
-- name_clean: English product name with brand and size
-- is_food: boolean (false for cleaning, pet food, hygiene, paper products)
-- primary_category: broad English category (Dairy, Poultry, Beverages, Snacks, Cleaning Products, etc.)
-- tags_en: 4-7 English search words a shopper would use
-- tags_lt: 4-7 Lithuanian search words a shopper would use
-- attributes: object with filterable properties like type, flavor, scent, packaging
+BULK_ENRICH_SYSTEM_PROMPT = """You are an expert grocery product analyst specializing in Lithuanian grocery stores (IKI, RIMI, Barbora, Promo Cash & Carry).
 
-Example for a single product:
-Product 1: Rokiškio pienas 2.5% riebumo, 1L | Rokiškio milk 2.5% fat, 1L | Pieno produktai | Rokiškio
+For EACH product, return a JSON object. Return all products as: {"results": [{...}, {...}]}
 
-{"results":[{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{"type":"fresh","packaging":"carton"}}]}
+Each object MUST have these fields:
+- name_clean: Clean English product name. Format: "[Brand] [Description] [Size]". Example: "Rokiškio Fresh Milk 2.5% 1L"
+- name_lt_clean: Same format but in clean Lithuanian. Example: "Rokiškio Šviežias Pienas 2.5% 1L"
+- brand: Extracted brand name (string or null). Rules:
+    * "Rokiškio pienas" → "Rokiškio"
+    * "IKI vištiena" → "IKI"
+    * "RIMI sultys" → "RIMI"
+    * "Žemaitijos sviestas" → "Žemaitijos"
+    * "Dvaro grietinėlė" → "Dvaro"
+    * "Coca-Cola" → "Coca-Cola", "Pepsi" → "Pepsi", "Danone" → "Danone"
+    * Leading ALLCAPS words are usually brands: "ALMA vanduo" → "Alma"
+    * If truly no brand, return null
+- canonical_category: MUST be one of these exact IDs: """ + ", ".join(_CATEGORY_IDS) + """
+    Key rules:
+    * Still/sparkling/mineral water → "water"
+    * Flavored water with sugar, lemonade, cola, energy drinks → "soda-soft-drinks"
+    * Fresh/UHT/plant milk → "milk", kefir/yogurt → "yogurt"
+    * Any beer (incl. non-alcoholic) → "beer", wine → "wine", spirits/vodka → "spirits"
+    * Cleaning sprays/powders → "cleaning", laundry detergent/softener → "laundry"
+    * Toilet paper/tissues/napkins → "paper-products"
+    * Shampoo/soap/deodorant → "personal-care"
+    * Dog/cat food → "pet-food"
+    * Deli meats/sausages/ham → "deli-meat", minced/ground meat → "minced-meat"
+- subcategory: More specific type within category (string). Examples:
+    * water: "still", "sparkling", "flavored", "mineral"
+    * milk: "fresh", "UHT", "oat milk", "lactose-free", "plant-based"
+    * cheese: "hard", "soft", "fresh", "blue", "cream cheese"
+    * meat/poultry: "breast", "drumsticks", "thighs", "whole", "marinated", "smoked"
+    * juice: "100% juice", "nectar", "smoothie", "concentrate"
+    * beer: "lager", "ale", "wheat beer", "non-alcoholic", "dark"
+    * bread: "white", "rye", "whole grain", "sourdough", "toast"
+    * yogurt: "plain", "fruit", "drinking", "Greek-style", "kefir"
+    * If no meaningful subcategory, use the canonical_category en name
+- is_food: boolean (false for cleaning, laundry, pet-food, paper-products, personal-care, health)
+- tags_en: 6-8 English search terms a shopper would use (include brand, product type, variants)
+- tags_lt: 6-8 Lithuanian search terms
+- attributes: object with filterable properties relevant to this product type:
+    * water: {"type": "still|sparkling|flavored", "flavor": "lemon|plain|...", "size_ml": 500}
+    * milk: {"fat_percent": 2.5, "type": "fresh|UHT|lactose-free|oat"}
+    * cheese: {"type": "hard|soft|fresh", "milk_source": "cow|goat|sheep"}
+    * meat: {"cut": "breast|drumstick|...", "state": "raw|marinated|smoked|frozen"}
+    * beer: {"type": "lager|ale|...", "alcohol_percent": 5.0, "non_alcoholic": false}
+    * Other products: include the most useful 1-3 filterable attributes
 
-CRITICAL: Return strictly valid JSON only. Do not include markdown formatting or explanations."""
+CRITICAL: Return ONLY valid JSON. No markdown. No explanations. Exactly one object per input product in "results" array."""
+
+def _normalize_brand(brand: str | None) -> str | None:
+    """Normalize brand name: strip excess whitespace, title-case if allcaps."""
+    if not brand:
+        return None
+    brand = brand.strip()
+    if not brand:
+        return None
+    # If fully uppercase (e.g. "IKI", "RIMI") keep as-is (they're store names)
+    if brand.isupper() and len(brand) <= 6:
+        return brand
+    # If allcaps word longer than 6 chars, title-case it
+    if brand.isupper():
+        brand = brand.title()
+    return brand
+
+
+def _validate_canonical_category(cat: str | None) -> str | None:
+    """Return cat if it's a valid known ID, else None."""
+    if cat and cat in _CATEGORY_IDS_SET:
+        return cat
+    return None
+
 
 def _db_save_batch(rows: list, items: list):
-    """Isolated DB operation to prevent SQLite thread locks."""
+    """Save enrichment results to DB, extracting fields from v2 enrichment."""
     conn = get_db_rw()
     try:
         for i, row in enumerate(rows):
             if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
+                item = items[i]
+                # Extract structured fields from v2 enrichment
+                name_clean = item.get("name_clean") or None
+                brand = _normalize_brand(item.get("brand"))
+                canonical_cat = _validate_canonical_category(item.get("canonical_category"))
+                subcategory = item.get("subcategory") or None
+
+                # Build update query — only overwrite brand if not already set
                 conn.execute(
-                    "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
-                    (json.dumps(items[i]), row["id"])
+                    """UPDATE Product SET
+                        enrichment = ?,
+                        enrichedAt = datetime('now'),
+                        enrichmentVersion = ?,
+                        nameEn = COALESCE(NULLIF(?, ''), nameEn),
+                        brand = COALESCE(NULLIF(?, ''), brand),
+                        canonicalCategory = COALESCE(NULLIF(?, ''), canonicalCategory),
+                        subcategory = COALESCE(NULLIF(?, ''), subcategory)
+                    WHERE id = ?""",
+                    (
+                        json.dumps(item),
+                        ENRICH_VERSION,
+                        name_clean,
+                        brand,
+                        canonical_cat,
+                        subcategory,
+                        row["id"],
+                    )
                 )
             else:
-                # Mark as processed so it doesn't get stuck in an infinite loop if LLM fails repeatedly
-                conn.execute("UPDATE Product SET enrichedAt = datetime('now') WHERE id = ?", (row["id"],))
+                # Mark as attempted so it doesn't loop forever on persistent LLM failure
+                conn.execute(
+                    "UPDATE Product SET enrichedAt = datetime('now'), enrichmentVersion = ? WHERE id = ?",
+                    (ENRICH_VERSION, row["id"])
+                )
         conn.commit()
     finally:
         conn.close()
@@ -785,7 +1004,11 @@ async def _bulk_enrich_manager():
     state = _bulk_enrich_state
     
     conn = get_db()
-    rows = conn.execute("SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL").fetchall()
+    rows = conn.execute(
+        "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product "
+        "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ?"
+        , (ENRICH_VERSION,)
+    ).fetchall()
     conn.close()
 
     total = len(rows)
@@ -1148,7 +1371,7 @@ def _embed_new_products() -> dict:
 
         rows = conn.execute("""
             SELECT p.id, p.storeId, p.nameLt, p.nameEn, p.categoryLt, p.categoryEn,
-                   p.brand, p.enrichment
+                   p.brand, p.enrichment, p.subcategory
             FROM Product p
         """).fetchall()
 
@@ -1190,24 +1413,26 @@ def _embed_new_products() -> dict:
 def _build_composite_text(row) -> str:
     """Build rich text for embedding from all available product data."""
     parts = [row["nameLt"]]
-    if row["nameEn"]:
+    if row.get("nameEn"):
         parts.append(row["nameEn"])
-    if row["categoryLt"]:
+    if row.get("categoryLt"):
         parts.append(row["categoryLt"])
-    if row["categoryEn"]:
+    if row.get("categoryEn"):
         parts.append(row["categoryEn"])
-    if row["brand"]:
+    if row.get("brand"):
         parts.append(row["brand"])
+    if row.get("subcategory"):
+        parts.append(row["subcategory"])
     # Include LLM enrichment tags if available
-    if row["enrichment"]:
+    if row.get("enrichment"):
         try:
             enr = json.loads(row["enrichment"]) if isinstance(row["enrichment"], str) else row["enrichment"]
             if enr.get("tags_en"):
                 parts.extend(enr["tags_en"])
             if enr.get("tags_lt"):
                 parts.extend(enr["tags_lt"])
-            if enr.get("primary_category"):
-                parts.append(enr["primary_category"])
+            if enr.get("subcategory"):
+                parts.append(enr["subcategory"])
         except (json.JSONDecodeError, TypeError):
             pass
     return " ".join(parts)

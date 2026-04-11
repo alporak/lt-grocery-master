@@ -10,6 +10,7 @@ export async function GET(req: NextRequest) {
   const storeIds = searchParams.get("storeIds"); // comma-separated store IDs
   const storeId = searchParams.get("storeId"); // legacy single store
   const category = searchParams.get("category");
+  const brand = searchParams.get("brand") || "";
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = parseInt(searchParams.get("pageSize") || "20", 10);
   const lang = searchParams.get("lang") || "lt";
@@ -45,6 +46,9 @@ export async function GET(req: NextRequest) {
           { categoryEn: { contains: category } },
           { canonicalCategory: category },
         ];
+      }
+      if (brand) {
+        where.brand = brand;
       }
 
       const [products, total] = await Promise.all([
@@ -119,6 +123,10 @@ export async function GET(req: NextRequest) {
     } else {
       where.OR = [...(Array.isArray(where.OR) ? where.OR : []), ...catConditions];
     }
+  }
+
+  if (brand) {
+    where.brand = brand;
   }
 
   // Fetch more results for relevance scoring when searching
