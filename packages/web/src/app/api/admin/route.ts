@@ -387,8 +387,10 @@ export async function POST(req: NextRequest) {
         await updatePipelineState("enriching");
         const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
         const ollamaConfig = await getOllamaConfig();
+        const useBulkEnrich = !ollamaConfig.useOllama;
+        const endpoint = useBulkEnrich ? "/bulk-enrich" : "/process";
         try {
-          const res = await fetch(`${embedderUrl}/process`, {
+          const res = await fetch(`${embedderUrl}${endpoint}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

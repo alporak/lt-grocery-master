@@ -46,6 +46,12 @@ OLLAMA_BATCH_SIZE = int(os.getenv("OLLAMA_BATCH_SIZE", "20"))
 OLLAMA_CHUNK_SIZE = int(os.getenv("OLLAMA_CHUNK_SIZE", "30"))
 OLLAMA_PARALLEL_REQUESTS = int(os.getenv("OLLAMA_PARALLEL_REQUESTS", "2"))
 
+
+# --- Gemini config ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-3.1-flash"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/v1/chat/completions"
+
 # --- Global state ---
 model = None  # SentenceTransformer, loaded at startup
 embeddings: Optional[np.ndarray] = None  # shape (N, 384)
@@ -545,15 +551,21 @@ async def process(req: ProcessRequest | None = None):
 
     # Step 3: LLM enrichment (provider determined by request or env)
     provider = (req.provider if req else None) or "groq"
-    has_llm = (provider == "ollama" and (req and req.ollama_url or OLLAMA_URL)) or (provider == "groq" and GROQ_API_KEY)
+    has_llm = (
+        (provider == "ollama" and ((req and req.ollama_url) or OLLAMA_URL))
+        or (provider == "groq" and (GROQ_API_KEY or _has_multi_provider_keys()))
+    )
     if has_llm:
-        enrich_req = EnrichRequest(
-            provider=provider,
-            ollama_url=(req.ollama_url if req else "") or "",
-            ollama_model=(req.ollama_model if req else "") or "",
-        )
-        enrich_result = await enrich(enrich_req)
-        results["enrich"] = enrich_result
+        if provider == "groq" and _has_multi_provider_keys():
+            results["enrich"] = await _run_bulk_enrich()
+        else:
+            enrich_req = EnrichRequest(
+                provider=provider,
+                ollama_url=(req.ollama_url if req else "") or "",
+                ollama_model=(req.ollama_model if req else "") or "",
+            )
+            enrich_result = await enrich(enrich_req)
+            results["enrich"] = enrich_result
     else:
         results["enrich"] = {"skipped": True, "reason": f"No {provider} configuration available"}
 
@@ -578,6 +590,7 @@ def import_data():
 
 # --- Bulk enrichment via Groq API ---
 # Runs as a background task so it survives client disconnects
+# --- Concurrent Multi-Provider Swarm (Llama 3.1 8B Edition) ---
 
 _bulk_enrich_state = {
     "running": False,
@@ -585,10 +598,25 @@ _bulk_enrich_state = {
     "done": 0,
     "failed": 0,
     "error": None,
+    "active_workers": 0,
     "started_at": None,
     "finished_at": None,
-    "provider": None,
 }
+
+# 11 Different Endpoints, 1 Unified Model (Llama 3.1 8B Instruct)
+MULTI_PROVIDERS =[
+    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://api.groq.com/openai/v1/chat/completions",                "model": "llama-3.1-8b-instant",                         "rpm": 30, "json_mode": True},
+    {"name": "Cerebras",   "env": "CEREBRAS_API_KEY",   "url": "https://api.cerebras.ai/v1/chat/completions",                    "model": "llama3.1-8b",                                  "rpm": 30, "json_mode": True},
+    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY", "url": "https://openrouter.ai/api/v1/chat/completions",                  "model": "meta-llama/llama-3.1-8b-instruct:free",        "rpm": 20, "json_mode": False},
+    {"name": "NVIDIA NIM", "env": "NVIDIA_API_KEY",     "url": "https://integrate.api.nvidia.com/v1/chat/completions",           "model": "meta/llama-3.1-8b-instruct",                   "rpm": 40, "json_mode": False},
+    {"name": "SambaNova",  "env": "SAMBANOVA_API_KEY",  "url": "https://api.sambanova.ai/v1/chat/completions",                   "model": "Meta-Llama-3.1-8B-Instruct",                   "rpm": 30, "json_mode": True},
+    {"name": "Hyperbolic", "env": "HYPERBOLIC_API_KEY", "url": "https://api.hyperbolic.xyz/v1/chat/completions",                 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",        "rpm": 30, "json_mode": False},
+    {"name": "GitHub",     "env": "GITHUB_TOKEN",       "url": "https://models.inference.ai.azure.com/chat/completions",         "model": "Meta-Llama-3.1-8B-Instruct",                   "rpm": 15, "json_mode": True},
+    {"name": "Scaleway",   "env": "SCALEWAY_API_KEY",   "url": "https://api.scaleway.ai/v1/chat/completions",                    "model": "llama-3.1-8b-instruct",                        "rpm": 30, "json_mode": False},
+    {"name": "Nebius",     "env": "NEBIUS_API_KEY",     "url": "https://api.studio.nebius.ai/v1/chat/completions",               "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",        "rpm": 30, "json_mode": False},
+    {"name": "Novita",     "env": "NOVITA_API_KEY",     "url": "https://api.novita.ai/v3/openai/chat/completions",               "model": "meta-llama/llama-3.1-8b-instruct",             "rpm": 30, "json_mode": True},
+    {"name": "Fireworks",  "env": "FIREWORKS_API_KEY",  "url": "https://api.fireworks.ai/inference/v1/chat/completions",         "model": "accounts/fireworks/models/llama-v3p1-8b-instruct", "rpm": 30, "json_mode": True},
+]
 
 BULK_ENRICH_SYSTEM_PROMPT = """You classify Lithuanian grocery products. For EACH product, return a JSON object.
 When given multiple products, return a JSON object with a "results" array containing one object per product, in the same order.
@@ -604,233 +632,229 @@ Each object must have:
 Example for a single product:
 Product 1: Rokiškio pienas 2.5% riebumo, 1L | Rokiškio milk 2.5% fat, 1L | Pieno produktai | Rokiškio
 
-{"results":[{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{"type":"fresh","packaging":"carton"}}]}"""
+{"results":[{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{"type":"fresh","packaging":"carton"}}]}
 
+CRITICAL: Return strictly valid JSON only. Do not include markdown formatting or explanations."""
 
-async def _bulk_enrich_worker(api_key: str, model: str, provider: str = "groq",
-                               ollama_url: str = "", ollama_model: str = ""):
-    """Background worker that enriches all un-enriched products in batches."""
-    global _bulk_enrich_state
-    state = _bulk_enrich_state
-    is_ollama = provider == "ollama"
-    batch_size = OLLAMA_BATCH_SIZE if is_ollama else GROQ_BATCH_SIZE
-    timeout = 600.0 if is_ollama else 60.0
-
+def _db_save_batch(rows: list, items: list):
+    """Isolated DB operation to prevent SQLite thread locks."""
     conn = get_db_rw()
-
     try:
-        total = conn.execute("SELECT count(*) FROM Product WHERE enrichedAt IS NULL").fetchone()[0]
-        state["total"] = total
-        log.info(f"[BulkEnrich] Starting: {total} products pending, provider={provider}, batch_size={batch_size}")
-
-        if total == 0:
-            state["running"] = False
-            state["finished_at"] = time.time()
-            conn.close()
-            return
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            while state["running"]:
-                rows = conn.execute(
-                    "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL LIMIT ?",
-                    (batch_size,)
-                ).fetchall()
-
-                if not rows:
-                    break
-
-                # Build batched prompt
-                product_lines = []
-                for i, row in enumerate(rows):
-                    product_lines.append(f"Product {i+1}: {_build_product_text(row)}")
-                batch_prompt = "\n".join(product_lines)
-
-                if is_ollama:
-                    data = await _llm_chat(
-                        client,
-                        provider="ollama",
-                        system_prompt=BULK_ENRICH_SYSTEM_PROMPT,
-                        user_prompt=batch_prompt,
-                        max_tokens=4000,
-                        ollama_url=ollama_url,
-                        ollama_model=ollama_model,
-                    )
-
-                    if data is None:
-                        state["failed"] += len(rows)
-                        for row in rows:
-                            conn.execute(
-                                "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
-                                (row["id"],)
-                            )
-                        conn.commit()
-                        await asyncio.sleep(0.5)
-                        continue
-                else:
-                    # Groq path (existing logic with API key auth)
-                    try:
-                        resp = await client.post(GROQ_URL, json={
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
-                                {"role": "user", "content": batch_prompt},
-                            ],
-                            "temperature": 0.1,
-                            "max_tokens": 4000,
-                            "response_format": {"type": "json_object"},
-                        }, headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        })
-
-                        if resp.status_code == 429:
-                            retry_after = float(resp.headers.get("retry-after", "10")) + 2
-                            log.warning(f"[BulkEnrich] Rate limited, waiting {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            continue  # retry same batch
-
-                        if resp.status_code == 401:
-                            state["error"] = "Invalid API key"
-                            state["running"] = False
-                            break
-
-                        if resp.status_code == 413:
-                            log.warning(f"[BulkEnrich] 413 Payload Too Large for {len(rows)} products, marking as failed")
-                            for row in rows:
-                                conn.execute(
-                                    "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
-                                    (row["id"],)
-                                )
-                            conn.commit()
-                            state["failed"] += len(rows)
-                            await asyncio.sleep(GROQ_REQUEST_INTERVAL)
-                            continue
-
-                        if resp.status_code != 200:
-                            log.warning(f"[BulkEnrich] Groq returned {resp.status_code}")
-                            state["failed"] += len(rows)
-                            for row in rows:
-                                conn.execute(
-                                    "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
-                                    (row["id"],)
-                                )
-                            conn.commit()
-                            await asyncio.sleep(GROQ_REQUEST_INTERVAL)
-                            continue
-
-                        result = resp.json()
-                        content = result["choices"][0]["message"]["content"]
-                        data = json.loads(content)
-
-                    except Exception as e:
-                        log.warning(f"[BulkEnrich] Error on batch: {e}")
-                        state["failed"] += len(rows)
-                        for row in rows:
-                            conn.execute(
-                                "UPDATE Product SET enrichedAt = datetime('now') WHERE id = ? AND enrichedAt IS NULL",
-                                (row["id"],)
-                            )
-                        conn.commit()
-                        await asyncio.sleep(GROQ_REQUEST_INTERVAL)
-                        continue
-
-                # Parse results (shared by both paths)
-                items = data.get("results") if isinstance(data, dict) else data
-                if not isinstance(items, list):
-                    items = [data] if isinstance(data, dict) and "name_clean" in data else []
-
-                for i, row in enumerate(rows):
-                    if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
-                        conn.execute(
-                            "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
-                            (json.dumps(items[i]), row["id"])
-                        )
-                        state["done"] += 1
-                    else:
-                        state["failed"] += 1
-
-                conn.commit()
-                log.info(f"[BulkEnrich] Progress: {state['done']}/{state['total']} done, {state['failed']} failed")
-
-                await asyncio.sleep(0.5 if is_ollama else GROQ_REQUEST_INTERVAL)
-
-    except Exception as e:
-        state["error"] = str(e)
-        log.error(f"[BulkEnrich] Fatal error: {e}")
-    finally:
+        for i, row in enumerate(rows):
+            if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
+                conn.execute(
+                    "UPDATE Product SET enrichment = ?, enrichedAt = datetime('now') WHERE id = ?",
+                    (json.dumps(items[i]), row["id"])
+                )
+            else:
+                # Mark as processed so it doesn't get stuck in an infinite loop if LLM fails repeatedly
+                conn.execute("UPDATE Product SET enrichedAt = datetime('now') WHERE id = ?", (row["id"],))
         conn.commit()
+    finally:
         conn.close()
-        state["running"] = False
-        state["finished_at"] = time.time()
-        log.info(f"[BulkEnrich] Finished: {state['done']} done, {state['failed']} failed")
+
+async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict):
+    """Pulls batches from the queue and hits a specific free API."""
+    api_key = os.getenv(provider["env"])
+    if not api_key:
+        log.info(f"Skipping {provider['name']} worker: {provider['env']} missing.")
+        return
+
+    log.info(f"Deployed {provider['name']} worker (Model: {provider['model']}, Limit: {provider['rpm']} RPM)")
+    state["active_workers"] += 1
+    
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    
+    # Calculate the exact delay needed to respect this provider's free RPM limits
+    delay = 60.0 / provider["rpm"]
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while state["running"]:
+            try:
+                batch = await queue.get()
+            except asyncio.CancelledError:
+                break
+                
+            rows = batch["rows"]
+            retries = batch.get("retries", 0)
+
+            if retries > 3:
+                log.warning(f"Batch failed after 3 retries on {provider['name']}. Dropping.")
+                state["failed"] += len(rows)
+                _db_save_batch(rows, []) 
+                queue.task_done()
+                continue
+
+            # Build user prompt
+            lines =[f"Product {i+1}: {_build_product_text(row)}" for i, row in enumerate(rows)]
+            user_prompt = "\n".join(lines)
+
+            payload = {
+                "model": provider["model"],
+                "messages":[
+                    {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.1,
+            }
+            
+            if provider.get("json_mode"):
+                payload["response_format"] = {"type": "json_object"}
+
+            try:
+                resp = await client.post(provider["url"], json=payload, headers=headers)
+                
+                # Handling standard rate limiting
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("retry-after", "5"))
+                    log.warning(f"[{provider['name']}] Rate limited. Waiting {retry_after}s...")
+                    await asyncio.sleep(retry_after + 1)
+                    await queue.put({"rows": rows, "retries": retries + 1}) # Put back in queue
+                    queue.task_done()
+                    continue
+                    
+                if resp.status_code != 200:
+                    log.warning(f"[{provider['name']}] HTTP {resp.status_code}: {resp.text[:100]}")
+                    await queue.put({"rows": rows, "retries": retries + 1})
+                    queue.task_done()
+                    await asyncio.sleep(delay)
+                    continue
+
+                content = resp.json()["choices"][0]["message"]["content"]
+                
+                # Strip markdown codeblocks common in open models
+                if "```json" in content: content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content: content = content.split("```")[1].split("```")[0].strip()
+
+                parsed = json.loads(content)
+                items = parsed.get("results",[])
+                
+                # Fallback for weirdly formatted JSON
+                if not isinstance(items, list):
+                    items = [parsed]
+                    
+                _db_save_batch(rows, items)
+                state["done"] += len(rows)
+                log.info(f"[{provider['name']}] Enriched {len(rows)} products ({state['done']}/{state['total']} total).")
+                
+                queue.task_done()
+                await asyncio.sleep(delay)
+
+            except Exception as e:
+                log.error(f"[{provider['name']}] Error: {str(e)}")
+                await queue.put({"rows": rows, "retries": retries + 1})
+                queue.task_done()
+                await asyncio.sleep(delay)
+
+    state["active_workers"] -= 1
+
+def _has_multi_provider_keys() -> bool:
+    return any(os.getenv(provider["env"]) for provider in MULTI_PROVIDERS)
 
 
-class BulkEnrichRequest(BaseModel):
-    api_key: str = ""
-    model: str = "llama-3.1-8b-instant"
-    provider: str = "groq"       # "groq" or "ollama"
-    ollama_url: str = ""
-    ollama_model: str = ""
-
-
-@app.post("/bulk-enrich")
-async def bulk_enrich(req: BulkEnrichRequest):
-    """Start bulk enrichment. Runs in the background."""
+async def _run_bulk_enrich() -> dict:
     global _bulk_enrich_state
-    if _bulk_enrich_state["running"]:
-        return {"error": "Bulk enrichment already running"}, 409
-
-    is_ollama = req.provider == "ollama"
-
-    if is_ollama:
-        if not (req.ollama_url or OLLAMA_URL):
-            return {"error": "Ollama URL not configured"}
-    else:
-        api_key = req.api_key or GROQ_API_KEY
-        if not api_key:
-            return {"error": "No API key provided and GROQ_API_KEY not set"}
-
-    # Count pending
-    conn = get_db()
-    total = conn.execute("SELECT count(*) FROM Product WHERE enrichedAt IS NULL").fetchone()[0]
-    conn.close()
+    if not _has_multi_provider_keys():
+        return {"skipped": True, "reason": "No multi-provider API keys configured"}
 
     _bulk_enrich_state = {
         "running": True,
-        "total": total,
+        "total": 0,
         "done": 0,
         "failed": 0,
+        "active_workers": 0,
         "error": None,
         "started_at": time.time(),
         "finished_at": None,
-        "provider": req.provider,
+    }
+    await _bulk_enrich_manager()
+
+    return {
+        "enriched": _bulk_enrich_state["done"],
+        "failed": _bulk_enrich_state["failed"],
+        "total_pending": _bulk_enrich_state["total"],
+        "active_workers": _bulk_enrich_state["active_workers"],
+        "error": _bulk_enrich_state["error"],
+        "providers": [provider["name"] for provider in MULTI_PROVIDERS if os.getenv(provider["env"])],
     }
 
-    asyncio.create_task(_bulk_enrich_worker(
-        api_key=req.api_key or GROQ_API_KEY if not is_ollama else "",
-        model=req.model,
-        provider=req.provider,
-        ollama_url=req.ollama_url,
-        ollama_model=req.ollama_model,
-    ))
-    return {"started": True, "total": total, "provider": req.provider}
 
+async def _bulk_enrich_manager():
+    """Coordinates the queue and the dynamic worker swarm."""
+    global _bulk_enrich_state
+    state = _bulk_enrich_state
+    
+    conn = get_db()
+    rows = conn.execute("SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product WHERE enrichedAt IS NULL").fetchall()
+    conn.close()
+
+    total = len(rows)
+    state["total"] = total
+    
+    if total == 0:
+        log.info("No products need enrichment.")
+        state["running"] = False
+        state["finished_at"] = time.time()
+        return
+
+    # 1. Fill Queue (Batching 15 products per prompt)
+    queue = asyncio.Queue()
+    batch_size = 15
+    for i in range(0, total, batch_size):
+        chunk = [dict(r) for r in rows[i:i + batch_size]]
+        queue.put_nowait({"rows": chunk, "retries": 0})
+
+    log.info(f"[Coordinator] Queued {queue.qsize()} batches. Waking up the swarm...")
+
+    # 2. Spawn Workers based on available API Keys
+    workers =[]
+    for provider in MULTI_PROVIDERS:
+        if os.getenv(provider["env"]):
+            worker_task = asyncio.create_task(_api_worker(provider, queue, state))
+            workers.append(worker_task)
+
+    if not workers:
+        state["error"] = "No API keys found. You must set at least one provider key (e.g., GROQ_API_KEY) in the environment."
+        state["running"] = False
+        return
+
+    # 3. Wait for the queue to drain
+    await queue.join()
+
+    # 4. Clean up and report
+    state["running"] = False
+    state["finished_at"] = time.time()
+    
+    for w in workers:
+        w.cancel()
+    
+    log.info(f"[Coordinator] Swarm Finished! Total completed: {state['done']}, Failed: {state['failed']}")
+
+@app.post("/bulk-enrich")
+async def bulk_enrich():
+    global _bulk_enrich_state
+    if _bulk_enrich_state["running"]:
+        return {"error": "Swarm is already running"}
+
+    _bulk_enrich_state = {
+        "running": True, "total": 0, "done": 0, "failed": 0, 
+        "active_workers": 0, "error": None, "started_at": time.time(), "finished_at": None,
+    }
+
+    asyncio.create_task(_bulk_enrich_manager())
+    return {"status": "Swarm deployed", "message": "Check /bulk-enrich/status for live progress"}
 
 @app.post("/bulk-enrich/stop")
 async def bulk_enrich_stop():
-    """Stop the running bulk enrichment."""
     global _bulk_enrich_state
     if _bulk_enrich_state["running"]:
         _bulk_enrich_state["running"] = False
         return {"stopped": True}
-    return {"stopped": False, "message": "Not running"}
-
+    return {"stopped": False}
 
 @app.get("/bulk-enrich/status")
 async def bulk_enrich_status():
-    """Get bulk enrichment progress."""
     return _bulk_enrich_state
-
 
 # --- Product Grouping ---
 
