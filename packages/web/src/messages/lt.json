@@ -28,7 +28,8 @@
     "settings": "Nustatymai",
     "categories": "Kategorijos",
     "categoryParser": "Kategorijų kūrėjas",
-    "manualEnrichment": "Rankinis praturtinimas"
+    "manualEnrichment": "Rankinis praturtinimas",
+    "advancedSettings": "Išplėstiniai"
   },
   "dashboard": {
     "title": "Pradžia",

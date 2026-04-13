@@ -46,9 +46,12 @@ export class RimiScraper extends BaseScraper {
       await this.delay(2000);
       await this.dismissCookies(page);
 
-      for (const catPath of RimiScraper.CATEGORY_PAGES) {
+      const totalCats = RimiScraper.CATEGORY_PAGES.length;
+      for (let ci = 0; ci < totalCats; ci++) {
+        const catPath = RimiScraper.CATEGORY_PAGES[ci];
         try {
           const catName = this.categoryNameFromPath(catPath);
+          this.onProgress?.({ categoriesTotal: totalCats, categoriesCompleted: ci, currentCategory: catName });
           this.log(`Scraping category: ${catName}`);
           const catUrl = `${RimiScraper.BASE}${catPath}`;
           const products = await this.scrapeCategory(page, catUrl, catName);
@@ -58,6 +61,7 @@ export class RimiScraper extends BaseScraper {
           this.log(`Failed ${catPath}: ${err}`);
         }
       }
+      this.onProgress?.({ categoriesTotal: totalCats, categoriesCompleted: totalCats });
     } finally {
       await page.close();
     }
@@ -100,10 +104,9 @@ export class RimiScraper extends BaseScraper {
   ): Promise<ScrapedProduct[]> {
     const products: ScrapedProduct[] = [];
     let currentPage = 1;
-    const maxPages = 10;
     const pageSize = 80;
 
-    while (currentPage <= maxPages) {
+    while (true) {
       const pageUrl =
         currentPage === 1
           ? `${url}?currentPage=1&pageSize=${pageSize}`

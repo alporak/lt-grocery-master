@@ -8,7 +8,7 @@ async function main() {
   console.log(
     slug ? `Running scrape for ${slug}...` : "Running scrape for all stores..."
   );
-  await runScrapeJob(slug || undefined);
+  await runScrapeJob(slug ? [slug] : undefined);
   console.log("Done.");
   process.exit(0);
 }

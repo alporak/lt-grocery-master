@@ -271,6 +271,7 @@ export async function POST(req: NextRequest) {
 
   if (action === "scrape-only") {
     const requestedAt = new Date();
+    const storeSlugs: string[] = Array.isArray(body.storeSlugs) ? body.storeSlugs : [];
     await prisma.settings.upsert({
       where: { key: "pipelineState" },
       update: {
@@ -282,6 +283,9 @@ export async function POST(req: NextRequest) {
           storesCompleted: 0,
           productsScraped: 0,
           currentStore: null,
+          categoriesTotal: 0,
+          categoriesCompleted: 0,
+          currentCategory: null,
           finishedAt: null,
           error: null,
           updatedAt: requestedAt.toISOString(),
@@ -291,6 +295,12 @@ export async function POST(req: NextRequest) {
         key: "pipelineState",
         value: JSON.stringify({ status: "scraping" }),
       },
+    });
+    // Store which stores to scrape (empty = all enabled)
+    await prisma.settings.upsert({
+      where: { key: "scrapeRequestedStores" },
+      update: { value: JSON.stringify(storeSlugs) },
+      create: { key: "scrapeRequestedStores", value: JSON.stringify(storeSlugs) },
     });
     await prisma.settings.upsert({
       where: { key: "scrapeRequested" },

@@ -1,5 +1,13 @@
 import { chromium, Browser, BrowserContext, Page } from "playwright";
 
+export interface ScrapeProgress {
+  categoriesTotal: number;
+  categoriesCompleted: number;
+  currentCategory?: string;
+}
+
+export type ProgressCallback = (info: ScrapeProgress) => void;
+
 export interface ScrapedProduct {
   externalId: string;
   nameLt: string;
@@ -22,6 +30,11 @@ export abstract class BaseScraper {
   protected context: BrowserContext | null = null;
   protected headless: boolean;
   protected storeName: string;
+  protected onProgress?: ProgressCallback;
+
+  setProgressCallback(cb: ProgressCallback) {
+    this.onProgress = cb;
+  }
 
   constructor(storeName: string) {
     this.storeName = storeName;

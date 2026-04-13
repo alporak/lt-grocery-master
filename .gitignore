@@ -6,3 +6,4 @@ data/*.db-journal
 data/embeddings/
 .env
 *.log
+packages/data/grocery.db

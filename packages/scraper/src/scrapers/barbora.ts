@@ -1,7 +1,7 @@
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Page, BrowserContext, Browser } from "playwright";
-import { ScrapedProduct } from "./base-scraper.js";
+import { ScrapedProduct, ProgressCallback } from "./base-scraper.js";
 
 chromium.use(StealthPlugin());
 
@@ -13,6 +13,11 @@ export class BarboraScraper {
   private static BASE = "https://barbora.lt";
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
+  private onProgress?: ProgressCallback;
+
+  setProgressCallback(cb: ProgressCallback) {
+    this.onProgress = cb;
+  }
 
   private log(msg: string) {
     console.log(`[Barbora] ${msg}`);
@@ -84,11 +89,14 @@ export class BarboraScraper {
       const allLinks = [...new Set([...extraPages, ...categoryLinks])];
       this.log(`Found ${allLinks.length} category/promo pages`);
 
-      for (const url of allLinks) {
+      const totalCats = allLinks.length;
+      for (let ci = 0; ci < totalCats; ci++) {
+        const url = allLinks[ci];
         try {
           const catName = decodeURIComponent(
             url.split("/").pop() || ""
           ).replace(/-/g, " ");
+          this.onProgress?.({ categoriesTotal: totalCats, categoriesCompleted: ci, currentCategory: catName });
           this.log(`Scraping: ${catName}`);
           const products = await this.scrapeCategory(page, url, catName);
           allProducts.push(...products);
@@ -97,6 +105,7 @@ export class BarboraScraper {
           this.log(`Failed ${url}: ${err}`);
         }
       }
+      this.onProgress?.({ categoriesTotal: totalCats, categoriesCompleted: totalCats });
     } finally {
       await page.close();
     }
@@ -131,9 +140,8 @@ export class BarboraScraper {
   ): Promise<ScrapedProduct[]> {
     const products: ScrapedProduct[] = [];
     let pageNum = 1;
-    const maxPages = 20;
 
-    while (pageNum <= maxPages) {
+    while (true) {
       const pageUrl = pageNum === 1 ? url : `${url}?page=${pageNum}`;
       await page.goto(pageUrl, {
         waitUntil: "domcontentloaded",
@@ -242,8 +250,11 @@ export class BarboraScraper {
       unitLabel = `€/${unitMatch[2]}`;
     }
 
+    // 1b. Strip deposit amounts (e.g. "Deposit 0,10€" / "Užstatas 0,10€") before price extraction
+    const withoutDeposit = text.replace(/(?:deposit|užstatas|depozitas)\s+\d+[.,]\d+\s*€/gi, "");
+
     // 2. Strip unit prices before finding package prices
-    const cleaned = text.replace(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/gi, "");
+    const cleaned = withoutDeposit.replace(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/gi, "");
 
     // 3. Find package prices only
     const priceMatches = [...cleaned.matchAll(/(\d+[.,]\d+)\s*€/g)];

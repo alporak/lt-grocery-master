@@ -28,7 +28,8 @@
     "settings": "Settings",
     "categories": "Categories",
     "categoryParser": "Category Parser",
-    "manualEnrichment": "Manual Enrichment"
+    "manualEnrichment": "Manual Enrichment",
+    "advancedSettings": "Advanced"
   },
   "dashboard": {
     "title": "Dashboard",

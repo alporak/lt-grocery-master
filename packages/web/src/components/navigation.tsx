@@ -9,8 +9,7 @@ import {
   MapPin,
   Settings,
   LayoutGrid,
-  Tags,
-  Cpu,
+  SlidersHorizontal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "./i18n-provider";
@@ -19,11 +18,10 @@ const navItems = [
   { path: "/", icon: LayoutDashboard, labelKey: "nav.dashboard" },
   { path: "/products", icon: Package, labelKey: "nav.products" },
   { path: "/categories", icon: LayoutGrid, labelKey: "nav.categories" },
-  { path: "/category-parser", icon: Tags, labelKey: "nav.categoryParser" },
-  { path: "/manual-enrichment", icon: Cpu, labelKey: "nav.manualEnrichment" },
   { path: "/grocery-lists", icon: ShoppingBasket, labelKey: "nav.groceryLists" },
   { path: "/stores", icon: MapPin, labelKey: "nav.stores" },
   { path: "/settings", icon: Settings, labelKey: "nav.settings" },
+  { path: "/advanced-settings", icon: SlidersHorizontal, labelKey: "nav.advancedSettings" },
 ];
 
 export function Sidebar() {

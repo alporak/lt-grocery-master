@@ -42,11 +42,13 @@ export class LastmileScraper extends BaseScraper {
       this.log(`Found ${categoryLinks.length} categories`);
 
       // 2. Scrape each category
-      for (const catUrl of categoryLinks) {
+      for (let ci = 0; ci < categoryLinks.length; ci++) {
+        const catUrl = categoryLinks[ci];
         try {
           const catName = decodeURIComponent(
             catUrl.split("/categories/").pop() || ""
           ).replace(/-/g, " ");
+          this.onProgress?.({ categoriesTotal: categoryLinks.length, categoriesCompleted: ci, currentCategory: catName });
           this.log(`Scraping category: ${catName}`);
           const products = await this.scrapeCategory(page, catUrl, catName);
           allProducts.push(...products);
@@ -55,6 +57,7 @@ export class LastmileScraper extends BaseScraper {
           this.log(`Failed category ${catUrl}: ${err}`);
         }
       }
+      this.onProgress?.({ categoriesTotal: categoryLinks.length, categoriesCompleted: categoryLinks.length });
     } finally {
       await page.close();
     }
@@ -91,21 +94,45 @@ export class LastmileScraper extends BaseScraper {
     await page.waitForSelector('a[href*="/product/"]', { timeout: 15000 }).catch(() => {});
     await this.delay(1500);
 
-    // Click "Rodyti daugiau" (load more) until all products are loaded
+    // Click "Rodyti daugiau" (load more) until all products are loaded.
+    // Stop when button disappears OR product count stops growing (stale guard).
     let loadMoreClicks = 0;
-    while (loadMoreClicks < 15) {
+    let staleTicks = 0;
+    let lastProductCount = 0;
+    while (true) {
       try {
         const loadMoreBtn = page.locator(
           'button:has-text("Rodyti daugiau"), button:has-text("rodyti daugiau")'
         );
-        if (await loadMoreBtn.first().isVisible({ timeout: 3000 })) {
-          await loadMoreBtn.first().click();
-          await this.delay(2000);
-          loadMoreClicks++;
-          this.log(`  Load more click ${loadMoreClicks}...`);
+        if (!(await loadMoreBtn.first().isVisible({ timeout: 3000 }))) break;
+
+        const countBefore = await page.$$eval(
+          `a[href*="/chain/${this.getCurrentChainSlug()}/product/"]`,
+          (els) => els.length
+        );
+        await loadMoreBtn.first().click();
+        loadMoreClicks++;
+        this.log(`  Load more click ${loadMoreClicks}...`);
+
+        // Wait for new products to appear (up to 5s), then a short settle delay
+        await page.waitForFunction(
+          (prev) => document.querySelectorAll('a[href*="/product/"]').length > prev,
+          countBefore,
+          { timeout: 5000 }
+        ).catch(() => {});
+        await this.delay(500);
+
+        const countAfter = await page.$$eval(
+          `a[href*="/chain/${this.getCurrentChainSlug()}/product/"]`,
+          (els) => els.length
+        );
+        if (countAfter === lastProductCount) {
+          staleTicks++;
+          if (staleTicks >= 2) break; // two consecutive non-growing clicks → done
         } else {
-          break;
+          staleTicks = 0;
         }
+        lastProductCount = countAfter;
       } catch {
         break;
       }

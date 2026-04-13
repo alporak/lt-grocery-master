@@ -129,7 +129,16 @@ async function main() {
       running = true;
       console.log(`[Scheduler] Manual scrape requested (${requestedValue}), running now...`);
       try {
-        await runScrapeJob();
+        // Check if specific stores were requested
+        let storeSlugs: string[] | undefined;
+        try {
+          const storesSetting = await prisma.settings.findUnique({ where: { key: "scrapeRequestedStores" } });
+          if (storesSetting?.value) {
+            const parsed = JSON.parse(storesSetting.value);
+            if (Array.isArray(parsed) && parsed.length > 0) storeSlugs = parsed;
+          }
+        } catch { /* ignore */ }
+        await runScrapeJob(storeSlugs);
         lastHandledRequest = requestedValue;
         await prisma.settings.upsert({
           where: { key: "scrapeRequestedHandled" },

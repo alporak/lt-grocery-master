@@ -44,11 +44,11 @@ async function updatePipelineState(update: Record<string, unknown>) {
   }
 }
 
-export async function runScrapeJob(storeSlug?: string) {
+export async function runScrapeJob(storeSlugs?: string[]) {
   const stores = await prisma.store.findMany({
     where: {
       enabled: true,
-      ...(storeSlug ? { slug: storeSlug } : {}),
+      ...(storeSlugs && storeSlugs.length > 0 ? { slug: { in: storeSlugs } } : {}),
     },
   });
 
@@ -75,8 +75,21 @@ export async function runScrapeJob(storeSlug?: string) {
     }
 
     console.log(`[ScrapeJob] Scraping ${store.name}...`);
-    await updatePipelineState({ currentStore: store.name });
+    await updatePipelineState({ currentStore: store.name, categoriesTotal: 0, categoriesCompleted: 0, currentCategory: null });
     const scraper = createScraper();
+
+    // Hook progress callback if scraper supports it
+    if ("setProgressCallback" in scraper && typeof (scraper as { setProgressCallback: unknown }).setProgressCallback === "function") {
+      (scraper as { setProgressCallback: (cb: unknown) => void }).setProgressCallback(
+        async (info: { categoriesTotal: number; categoriesCompleted: number; currentCategory?: string }) => {
+          await updatePipelineState({
+            categoriesTotal: info.categoriesTotal,
+            categoriesCompleted: info.categoriesCompleted,
+            currentCategory: info.currentCategory ?? null,
+          });
+        }
+      );
+    }
 
     // Create a log entry
     const log = await prisma.scrapeLog.create({

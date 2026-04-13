@@ -35,6 +35,7 @@ import {
 import { parseItem, formatParsed } from "@/lib/parse-item";
 import { computeLineCost } from "@/lib/cost";
 import { BrandPickerModal } from "@/components/BrandPickerModal";
+import { ProductPreviewModal } from "@/components/ProductPreviewModal";
 import { getPreferredBrand } from "@/lib/brandPreferences";
 
 interface Suggestion {
@@ -164,8 +165,17 @@ export default function GroceryListDetailPage() {
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, Record<number, number>>>({});
   const [dominantCategory, setDominantCategory] = useState<string | null>(null);
   const [showBrandPicker, setShowBrandPicker] = useState(false);
+  const [previewProductId, setPreviewProductId] = useState<number | null>(null);
   const suggestRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Live parse hint shown while typing
+  const liveHint = (() => {
+    if (!newItem.trim() || pickedSuggestion) return null;
+    const p = parseItem(newItem.trim());
+    if (p.name === newItem.trim() && p.quantity === 1 && !p.unit) return null;
+    return `→ "${p.name}"${p.quantity !== 1 || p.unit ? ` × ${p.quantity}${p.unit ? " " + p.unit : ""}` : ""}`;
+  })();
 
   const fetchList = useCallback(() => {
     if (!params.id) return;
@@ -185,7 +195,7 @@ export default function GroceryListDetailPage() {
       .catch(() => {});
   }, [fetchList, params.id]);
 
-  // Autocomplete suggestions
+  // Autocomplete suggestions — use parsed product name so "1.5 liter water" → "water"
   useEffect(() => {
     if (newItem.length < 2) {
       setSuggestions([]);
@@ -193,7 +203,9 @@ export default function GroceryListDetailPage() {
       return;
     }
     const timer = setTimeout(() => {
-      fetch(`/api/products/suggest?q=${encodeURIComponent(newItem)}&limit=6`)
+      const parsed = parseItem(newItem.trim());
+      const searchQuery = parsed.name.length >= 2 ? parsed.name : newItem.trim();
+      fetch(`/api/products/suggest?q=${encodeURIComponent(searchQuery)}&limit=8`)
         .then((r) => r.json())
         .then((data: { suggestions: Suggestion[]; dominantCategory: string | null }) => {
           const suggs = Array.isArray(data) ? data : (data.suggestions || []);
@@ -266,6 +278,18 @@ export default function GroceryListDetailPage() {
     setSuggestions([]);
     setShowSuggestions(false);
     inputRef.current?.focus();
+  };
+
+  const addSuggestionDirectly = async (s: Suggestion) => {
+    if (!list) return;
+    const items = [...list.items, { itemName: s.name, quantity: 1, unit: null, checked: false }];
+    setList({ ...list, items });
+    setNewItem("");
+    setNewQty("1");
+    setPickedSuggestion(null);
+    setSuggestions([]);
+    setShowSuggestions(false);
+    await saveItems(items);
   };
 
   const handleInputKeyDown = (e: React.KeyboardEvent) => {
@@ -517,29 +541,51 @@ export default function GroceryListDetailPage() {
                   {showSuggestions && suggestions.length > 0 && (
                     <div
                       ref={suggestRef}
-                      className="absolute z-50 top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg max-h-72 overflow-y-auto"
+                      className="absolute z-50 top-full left-0 right-0 mt-1 bg-popover border rounded-md shadow-lg max-h-80 overflow-y-auto"
                     >
                       {suggestions.map((s, i) => (
-                        <button
+                        <div
                           key={s.id}
-                          onClick={() => pickSuggestion(s)}
-                          className={`w-full text-left px-3 py-2 text-sm hover:bg-accent flex items-center justify-between gap-2 ${
-                            i === selectedSuggestion ? "bg-accent" : ""
-                          }`}
+                          className={`flex items-center gap-1 border-b last:border-0 ${i === selectedSuggestion ? "bg-accent" : ""}`}
                         >
-                          <div className="flex-1 min-w-0">
-                            <p className="font-medium truncate">{s.name}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {s.store}
-                              {s.brand && <span className="ml-1 text-primary/70">· {s.brand}</span>}
-                            </p>
-                          </div>
-                          {s.price != null && (
-                            <span className="text-xs font-semibold shrink-0">
-                              {s.price.toFixed(2)}€
-                            </span>
-                          )}
-                        </button>
+                          {/* Main row — click to fill input */}
+                          <button
+                            onClick={() => pickSuggestion(s)}
+                            className="flex-1 text-left px-3 py-2 text-sm hover:bg-accent/50 flex items-center gap-2 min-w-0"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium truncate">{s.name}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {s.store}
+                                {s.brand && <span className="ml-1 text-primary/70">· {s.brand}</span>}
+                                {s.weightValue && s.weightUnit && (
+                                  <span className="ml-1 text-muted-foreground/60">· {s.weightValue}{s.weightUnit}</span>
+                                )}
+                              </p>
+                            </div>
+                            {s.price != null && (
+                              <span className="text-xs font-semibold shrink-0 text-primary">
+                                {s.price.toFixed(2)}€
+                              </span>
+                            )}
+                          </button>
+                          {/* Preview button */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(s.id); setShowSuggestions(false); }}
+                            className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors shrink-0"
+                            title="Preview product"
+                          >
+                            <Info className="h-3.5 w-3.5" />
+                          </button>
+                          {/* Direct add button */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); addSuggestionDirectly(s); }}
+                            className="p-2 text-muted-foreground hover:text-primary hover:bg-accent/50 transition-colors shrink-0 mr-1"
+                            title="Add directly to list"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       ))}
                       {dominantCategory && (
                         <div className="border-t px-3 py-2">
@@ -604,11 +650,18 @@ export default function GroceryListDetailPage() {
                 </div>
               )}
 
-              {/* Parsed item preview */}
+              {/* Live parse hint */}
+              {liveHint && (
+                <div className="flex items-center gap-2 mt-1.5 text-xs text-muted-foreground">
+                  <Info className="h-3 w-3 shrink-0" />
+                  <span>{liveHint}</span>
+                </div>
+              )}
+              {/* Post-add parsed preview */}
               {parsedPreview && (
-                <div className="flex items-center gap-2 mt-2 text-xs text-emerald-600 dark:text-emerald-400 animate-in fade-in">
-                  <Info className="h-3 w-3" />
-                  <span>Parsed: <strong>{parsedPreview}</strong></span>
+                <div className="flex items-center gap-2 mt-1.5 text-xs text-emerald-600 dark:text-emerald-400 animate-in fade-in">
+                  <Check className="h-3 w-3" />
+                  <span>Added: <strong>{parsedPreview}</strong></span>
                 </div>
               )}
 
@@ -635,6 +688,25 @@ export default function GroceryListDetailPage() {
 
           {/* Items list */}
           <Card>
+            {list.items.length > 0 && (
+              <div className="px-4 pt-3 pb-1 flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">
+                  {list.items.filter(i => i.checked).length}/{list.items.length} checked
+                </span>
+                {list.items.some(i => i.checked) && (
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground underline"
+                    onClick={async () => {
+                      const items = list.items.filter(i => !i.checked);
+                      setList({ ...list, items });
+                      await saveItems(items);
+                    }}
+                  >
+                    Clear checked
+                  </button>
+                )}
+              </div>
+            )}
             <CardContent className="p-0">
               {list.items.length === 0 ? (
                 <p className="text-center text-muted-foreground py-8">
@@ -657,15 +729,14 @@ export default function GroceryListDetailPage() {
                       >
                         {item.checked && <Check className="h-3 w-3" />}
                       </button>
-                      <span
-                        className={`flex-1 text-sm ${
-                          item.checked
-                            ? "line-through text-muted-foreground"
-                            : ""
-                        }`}
-                      >
-                        {item.itemName}
-                      </span>
+                      <div className={`flex-1 min-w-0 ${item.checked ? "line-through text-muted-foreground" : ""}`}>
+                        <span className="text-sm">{item.itemName}</span>
+                        {(item.quantity !== 1 || item.unit) && (
+                          <span className="text-xs text-muted-foreground ml-1.5">
+                            ×{item.quantity}{item.unit ? " " + item.unit : ""}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-sm text-muted-foreground shrink-0">
                         {editingIndex === index ? (
                           <input
@@ -697,10 +768,10 @@ export default function GroceryListDetailPage() {
                               setEditingIndex(index);
                               setEditQty(String(item.quantity));
                             }}
-                            className="hover:bg-accent px-1 rounded cursor-pointer"
+                            className="hover:bg-accent px-1 rounded cursor-pointer text-xs"
                             title="Click to edit quantity"
                           >
-                            ×{item.quantity}
+                            edit qty
                           </button>
                         )}
                       </span>
@@ -853,6 +924,7 @@ export default function GroceryListDetailPage() {
                                       <button
                                         key={c.productId}
                                         onClick={() => selectCandidate(item.itemName, sr.storeId, ci)}
+                                        onDoubleClick={() => setPreviewProductId(c.productId)}
                                         className={`w-full flex items-center gap-2 px-3 py-2 rounded text-left text-sm transition-colors ${
                                           isSelected
                                             ? "bg-primary/10 border border-primary/30"
@@ -899,9 +971,16 @@ export default function GroceryListDetailPage() {
                                             </p>
                                           )}
                                         </div>
-                                        {isSelected && (
-                                          <Check className="h-4 w-4 text-primary shrink-0" />
-                                        )}
+                                        <div className="flex flex-col items-center gap-1 shrink-0">
+                                          {isSelected && <Check className="h-4 w-4 text-primary" />}
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.productId); }}
+                                            className="text-muted-foreground hover:text-foreground"
+                                            title="Preview product"
+                                          >
+                                            <Info className="h-3.5 w-3.5" />
+                                          </button>
+                                        </div>
                                       </button>
                                     );
                                   })}
@@ -1174,6 +1253,19 @@ export default function GroceryListDetailPage() {
             }
           }}
           onClose={() => setShowBrandPicker(false)}
+        />
+      )}
+
+      {previewProductId !== null && (
+        <ProductPreviewModal
+          productId={previewProductId}
+          onClose={() => setPreviewProductId(null)}
+          onAddToList={async (name) => {
+            if (!list) return;
+            const items = [...list.items, { itemName: name, quantity: 1, unit: null, checked: false }];
+            setList({ ...list, items });
+            await saveItems(items);
+          }}
         />
       )}
     </div>

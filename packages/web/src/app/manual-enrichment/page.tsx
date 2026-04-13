@@ -76,10 +76,12 @@ const CHAIN_COLORS: Record<string, string> = {
 
 export default function ManualEnrichmentPage() {
   // Config
-  const [batchSize, setBatchSize] = useState(10);
+  const [batchSizeInput, setBatchSizeInput] = useState("10");
   const [storeFilter, setStoreFilter] = useState("all");
   const [mode, setMode] = useState<"unenriched" | "all">("unenriched");
-  const [offset, setOffset] = useState(0);
+  const [offsetInput, setOffsetInput] = useState("0");
+  const batchSize = Math.max(1, parseInt(batchSizeInput) || 1);
+  const offset = Math.max(0, parseInt(offsetInput) || 0);
 
   // Reference data
   const [stores, setStores] = useState<StoreItem[]>([]);
@@ -105,6 +107,12 @@ export default function ManualEnrichmentPage() {
   const [pasteText, setPasteText] = useState("");
   const [parseResult, setParseResult] = useState<ParsedResult | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
+
+  // Editable items (mirrors parseResult.items but mutable)
+  const [editedItems, setEditedItems] = useState<(EnrichmentItem | null)[]>([]);
+
+  // Collapsible batch list
+  const [showBatch, setShowBatch] = useState(false);
 
   // Preview: which items are selected for saving (by index)
   const [selectedItems, setSelectedItems] = useState<Set<number>>(new Set());
@@ -178,7 +186,7 @@ export default function ManualEnrichmentPage() {
       setProducts(allProducts);
       setTotalUnenriched(latestTotalUnenriched);
       setTotalAll(latestTotalAll);
-      setOffset(useOffset);
+      setOffsetInput(String(useOffset));
       setStep("prompt");
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Error loading products");
@@ -229,6 +237,7 @@ export default function ManualEnrichmentPage() {
       setParseError(result.error ?? "Parse failed");
       return;
     }
+    setEditedItems([...result.items]);
     // Pre-select all valid items
     const sel = new Set<number>();
     result.items.forEach((item, i) => { if (item) sel.add(i); });
@@ -247,7 +256,7 @@ export default function ManualEnrichmentPage() {
     const entries = Array.from(selectedItems)
       .map((i) => ({
         id: products[i].id,
-        enrichment: parseResult.items[i] as EnrichmentItem,
+        enrichment: editedItems[i] as EnrichmentItem,
       }))
       .filter((e) => e.enrichment);
 
@@ -299,9 +308,36 @@ export default function ManualEnrichmentPage() {
   function reset() {
     setProducts([]);
     setParseResult(null);
+    setEditedItems([]);
     setPasteText("");
     setSaveResult(null);
     setStep("config");
+  }
+
+  function updateEditedItem(i: number, field: keyof EnrichmentItem, value: unknown) {
+    setEditedItems((prev) => {
+      const next = [...prev];
+      const existing = next[i];
+      if (existing === null || existing === undefined) {
+        next[i] = {
+          name_clean: "",
+          brand: null,
+          canonical_category: "",
+          subcategory: "",
+          is_food: true,
+          [field]: value,
+        };
+      } else {
+        next[i] = { ...existing, [field]: value };
+      }
+      return next;
+    });
+    // Auto-select item when user fills it in
+    setSelectedItems((prev) => {
+      const next = new Set(prev);
+      next.add(i);
+      return next;
+    });
   }
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -358,7 +394,7 @@ export default function ManualEnrichmentPage() {
                 {BATCH_SIZES.map((s) => (
                   <button
                     key={s}
-                    onClick={() => setBatchSize(s)}
+                    onClick={() => setBatchSizeInput(String(s))}
                     className={`px-3 py-1.5 text-sm rounded border font-mono transition-colors ${
                       batchSize === s
                         ? "bg-primary text-primary-foreground border-primary"
@@ -372,9 +408,12 @@ export default function ManualEnrichmentPage() {
                 <Input
                   type="number"
                   min={1}
-                  max={200}
-                  value={batchSize}
-                  onChange={(e) => setBatchSize(Math.max(1, parseInt(e.target.value) || 10))}
+                  value={batchSizeInput}
+                  onChange={(e) => setBatchSizeInput(e.target.value)}
+                  onBlur={(e) => {
+                    const v = parseInt(e.target.value);
+                    setBatchSizeInput(String(isNaN(v) || v < 1 ? 1 : v));
+                  }}
                   className="w-24 h-8 text-sm font-mono"
                 />
               </div>
@@ -424,8 +463,12 @@ export default function ManualEnrichmentPage() {
               <Input
                 type="number"
                 min={0}
-                value={offset}
-                onChange={(e) => setOffset(Math.max(0, parseInt(e.target.value) || 0))}
+                value={offsetInput}
+                onChange={(e) => setOffsetInput(e.target.value)}
+                onBlur={(e) => {
+                  const v = parseInt(e.target.value);
+                  setOffsetInput(String(isNaN(v) || v < 0 ? 0 : v));
+                }}
                 className="h-8 text-sm w-24 font-mono"
               />
             </div>
@@ -460,51 +503,60 @@ export default function ManualEnrichmentPage() {
               <span className="text-xs text-muted-foreground">{products.length} products in batch</span>
             </div>
 
-            {/* Product list (compact) */}
+            {/* Product list (collapsible) */}
             <div className="border rounded-md overflow-hidden">
-              <table className="w-full text-xs">
-                <thead className="bg-muted">
-                  <tr>
-                    <th className="text-left px-3 py-1.5 font-medium">#</th>
-                    <th className="text-left px-3 py-1.5 font-medium">Lithuanian Name</th>
-                    <th className="text-left px-3 py-1.5 font-medium">Store</th>
-                    <th className="text-left px-3 py-1.5 font-medium">Category (store)</th>
-                    <th className="text-left px-3 py-1.5 font-medium">Current Brand</th>
-                    <th className="text-left px-3 py-1.5 font-medium">Price</th>
-                    <th className="text-left px-3 py-1.5 font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {products.map((p, i) => (
-                    <tr key={p.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/30"}>
-                      <td className="px-3 py-1 font-mono text-muted-foreground">{i + 1}</td>
-                      <td className="px-3 py-1 max-w-xs">
-                        <span className="font-medium">{p.nameLt}</span>
-                        {p.nameEn && (
-                          <span className="text-muted-foreground ml-1">/ {p.nameEn}</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-1">
-                        <Badge className={`text-xs ${CHAIN_COLORS[p.store.chain] ?? CHAIN_COLORS.CUSTOM}`}>
-                          {p.store.name}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-1 text-muted-foreground">{p.categoryLt ?? "—"}</td>
-                      <td className="px-3 py-1">{p.brand ?? <span className="text-muted-foreground">—</span>}</td>
-                      <td className="px-3 py-1 font-mono">
-                        {p.latestPrice
-                          ? `${(p.latestPrice.salePrice ?? p.latestPrice.regularPrice).toFixed(2)}€`
-                          : "—"}
-                      </td>
-                      <td className="px-3 py-1">
-                        {p.enrichedAt
-                          ? <span className="text-amber-600">re-enrich</span>
-                          : <span className="text-blue-600">new</span>}
-                      </td>
+              <button
+                onClick={() => setShowBatch((v) => !v)}
+                className="w-full flex items-center justify-between px-3 py-2 bg-muted hover:bg-muted/80 transition-colors text-xs font-medium"
+              >
+                <span>{products.length} products in this batch</span>
+                {showBatch ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              </button>
+              {showBatch && (
+                <table className="w-full text-xs">
+                  <thead className="bg-muted/50">
+                    <tr>
+                      <th className="text-left px-3 py-1.5 font-medium">#</th>
+                      <th className="text-left px-3 py-1.5 font-medium">Lithuanian Name</th>
+                      <th className="text-left px-3 py-1.5 font-medium">Store</th>
+                      <th className="text-left px-3 py-1.5 font-medium">Category (store)</th>
+                      <th className="text-left px-3 py-1.5 font-medium">Current Brand</th>
+                      <th className="text-left px-3 py-1.5 font-medium">Price</th>
+                      <th className="text-left px-3 py-1.5 font-medium">Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {products.map((p, i) => (
+                      <tr key={p.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/30"}>
+                        <td className="px-3 py-1 font-mono text-muted-foreground">{i + 1}</td>
+                        <td className="px-3 py-1 max-w-xs">
+                          <span className="font-medium">{p.nameLt}</span>
+                          {p.nameEn && (
+                            <span className="text-muted-foreground ml-1">/ {p.nameEn}</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-1">
+                          <Badge className={`text-xs ${CHAIN_COLORS[p.store.chain] ?? CHAIN_COLORS.CUSTOM}`}>
+                            {p.store.name}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-1 text-muted-foreground">{p.categoryLt ?? "—"}</td>
+                        <td className="px-3 py-1">{p.brand ?? <span className="text-muted-foreground">—</span>}</td>
+                        <td className="px-3 py-1 font-mono">
+                          {p.latestPrice
+                            ? `${(p.latestPrice.salePrice ?? p.latestPrice.regularPrice).toFixed(2)}€`
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-1">
+                          {p.enrichedAt
+                            ? <span className="text-amber-600">re-enrich</span>
+                            : <span className="text-blue-600">new</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
 
             {/* Prompt copy section */}
@@ -622,9 +674,9 @@ export default function ManualEnrichmentPage() {
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-bold">Step 3 — Review &amp; Save</h2>
               <div className="flex items-center gap-2 text-xs">
-                <span className="text-green-600">{parseResult.items.filter(Boolean).length} valid</span>
+                <span className="text-green-600">{editedItems.filter(Boolean).length} valid</span>
                 <span className="text-muted-foreground">·</span>
-                <span className="text-destructive">{parseResult.items.filter((i) => !i).length} failed</span>
+                <span className="text-amber-600">{editedItems.filter((item) => !item).length} missing</span>
                 <span className="text-muted-foreground">·</span>
                 <span>{selectedItems.size} selected</span>
               </div>
@@ -645,7 +697,7 @@ export default function ManualEnrichmentPage() {
             <div className="flex gap-2 text-xs">
               <button
                 className="underline text-muted-foreground hover:text-foreground"
-                onClick={() => setSelectedItems(new Set(parseResult.items.map((_, i) => i).filter((i) => parseResult.items[i])))}
+                onClick={() => setSelectedItems(new Set(editedItems.map((_, i) => i).filter((i) => editedItems[i])))}
               >
                 Select all valid
               </button>
@@ -657,7 +709,7 @@ export default function ManualEnrichmentPage() {
               </button>
             </div>
 
-            {/* Per-product preview table */}
+            {/* Per-product preview table (editable) */}
             <div className="border rounded-md overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="bg-muted">
@@ -675,69 +727,103 @@ export default function ManualEnrichmentPage() {
                 </thead>
                 <tbody>
                   {products.map((product, i) => {
-                    const item = parseResult.items[i];
+                    const item = editedItems[i];
                     const isSelected = selectedItems.has(i);
-                    const changed_brand = item?.brand && item.brand !== product.brand;
-                    const changed_cat = item?.canonical_category && item.canonical_category !== product.canonicalCategory;
+                    const isMissing = item === null || item === undefined;
 
                     return (
                       <tr
                         key={product.id}
-                        className={`cursor-pointer transition-colors ${
-                          !item
-                            ? "opacity-40 bg-destructive/5"
+                        className={`transition-colors ${
+                          isMissing
+                            ? "bg-amber-50 dark:bg-amber-950/30"
                             : isSelected
                             ? "bg-primary/5"
-                            : "hover:bg-muted/50"
+                            : "hover:bg-muted/30"
                         }`}
-                        onClick={() => item && toggleItem(i)}
                       >
                         {/* Checkbox */}
-                        <td className="px-2 py-1.5 text-center">
-                          {item ? (
-                            <div className={`w-4 h-4 rounded border-2 inline-flex items-center justify-center ${isSelected ? "bg-primary border-primary" : "border-muted-foreground/40"}`}>
+                        <td className="px-2 py-1.5 text-center" onClick={() => !isMissing && toggleItem(i)}>
+                          {!isMissing ? (
+                            <div className={`w-4 h-4 rounded border-2 inline-flex items-center justify-center cursor-pointer ${isSelected ? "bg-primary border-primary" : "border-muted-foreground/40"}`}>
                               {isSelected && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
                             </div>
                           ) : (
-                            <AlertTriangle className="h-3 w-3 text-destructive inline" />
+                            <AlertTriangle className="h-3 w-3 text-amber-500 inline" />
                           )}
                         </td>
                         <td className="px-3 py-1.5 font-mono text-muted-foreground">{i + 1}</td>
-                        <td className="px-3 py-1.5 max-w-[160px]">
-                          <span className="truncate block">{product.nameLt}</span>
+                        <td className="px-3 py-1.5 max-w-[140px]">
+                          <span className="truncate block font-medium">{product.nameLt}</span>
+                          {product.nameEn && <span className="truncate block text-muted-foreground">{product.nameEn}</span>}
                         </td>
-                        <td className="px-3 py-1.5 font-medium max-w-[200px]">
-                          <span className="truncate block">{item?.name_clean ?? <span className="text-destructive">—</span>}</span>
+                        {/* name_clean — editable */}
+                        <td className="px-2 py-1 max-w-[180px]">
+                          <input
+                            type="text"
+                            value={item?.name_clean ?? ""}
+                            placeholder={isMissing ? "fill in…" : ""}
+                            onChange={(e) => updateEditedItem(i, "name_clean", e.target.value)}
+                            className={`w-full bg-transparent border rounded px-1.5 py-0.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-primary min-w-[120px] ${isMissing ? "border-amber-400 placeholder-amber-400" : "border-transparent hover:border-border"}`}
+                            onClick={(e) => e.stopPropagation()}
+                          />
                         </td>
-                        <td className="px-3 py-1.5">
-                          <span className={changed_brand ? "text-green-600 font-semibold" : ""}>
-                            {item?.brand ?? <span className="text-muted-foreground">null</span>}
-                          </span>
-                          {changed_brand && product.brand && (
-                            <span className="text-muted-foreground line-through ml-1 text-xs">{product.brand}</span>
-                          )}
+                        {/* brand — editable */}
+                        <td className="px-2 py-1">
+                          <input
+                            type="text"
+                            value={item?.brand ?? ""}
+                            placeholder="null"
+                            onChange={(e) => updateEditedItem(i, "brand", e.target.value || null)}
+                            className="w-full bg-transparent border border-transparent hover:border-border rounded px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary min-w-[80px]"
+                            onClick={(e) => e.stopPropagation()}
+                          />
                         </td>
-                        <td className="px-3 py-1.5">
-                          {item?.canonical_category ? (
-                            <span className={changed_cat ? "text-blue-600 font-semibold" : ""}>
-                              {CATEGORY_LABELS[item.canonical_category]?.icon}{" "}
-                              {CATEGORY_LABELS[item.canonical_category]?.en ?? item.canonical_category}
-                            </span>
-                          ) : (
-                            <span className="text-destructive">invalid</span>
-                          )}
-                          {changed_cat && product.canonicalCategory && (
-                            <span className="text-muted-foreground line-through ml-1 text-xs">
-                              {CATEGORY_LABELS[product.canonicalCategory]?.en ?? product.canonicalCategory}
-                            </span>
-                          )}
+                        {/* canonical_category — select */}
+                        <td className="px-2 py-1">
+                          <select
+                            value={item?.canonical_category ?? ""}
+                            onChange={(e) => updateEditedItem(i, "canonical_category", e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            className={`bg-transparent border rounded px-1 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary ${!item?.canonical_category ? "border-amber-400 text-amber-600" : "border-transparent hover:border-border"}`}
+                          >
+                            <option value="">— pick —</option>
+                            {Object.entries(CATEGORY_LABELS).map(([id, { icon, en }]) => (
+                              <option key={id} value={id}>{icon} {en}</option>
+                            ))}
+                          </select>
                         </td>
-                        <td className="px-3 py-1.5 text-muted-foreground">{item?.subcategory ?? "—"}</td>
-                        <td className="px-3 py-1.5">
-                          {item ? (item.is_food ? "🍎" : "🧹") : "—"}
+                        {/* subcategory — editable */}
+                        <td className="px-2 py-1">
+                          <input
+                            type="text"
+                            value={item?.subcategory ?? ""}
+                            placeholder="—"
+                            onChange={(e) => updateEditedItem(i, "subcategory", e.target.value)}
+                            className="w-full bg-transparent border border-transparent hover:border-border rounded px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary min-w-[80px]"
+                            onClick={(e) => e.stopPropagation()}
+                          />
                         </td>
-                        <td className="px-3 py-1.5 text-muted-foreground max-w-[180px]">
-                          <span className="truncate block">{item?.tags_en?.slice(0, 3).join(", ") ?? "—"}</span>
+                        {/* is_food — toggle */}
+                        <td className="px-2 py-1.5 text-center">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); updateEditedItem(i, "is_food", !(item?.is_food ?? true)); }}
+                            title="Toggle food/non-food"
+                            className="text-base leading-none"
+                          >
+                            {(item?.is_food ?? true) ? "🍎" : "🧹"}
+                          </button>
+                        </td>
+                        {/* tags_en — editable comma list */}
+                        <td className="px-2 py-1 max-w-[180px]">
+                          <input
+                            type="text"
+                            value={item?.tags_en?.join(", ") ?? ""}
+                            placeholder="tag1, tag2…"
+                            onChange={(e) => updateEditedItem(i, "tags_en", e.target.value ? e.target.value.split(",").map((t) => t.trim()).filter(Boolean) : undefined)}
+                            className="w-full bg-transparent border border-transparent hover:border-border rounded px-1.5 py-0.5 text-xs text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary min-w-[120px]"
+                            onClick={(e) => e.stopPropagation()}
+                          />
                         </td>
                       </tr>
                     );
@@ -798,7 +884,7 @@ export default function ManualEnrichmentPage() {
                 size="sm"
                 onClick={() => {
                   const nextOffset = offset + products.length;
-                  setOffset(nextOffset);
+                  setOffsetInput(String(nextOffset));
                   loadBatch(nextOffset);
                 }}
                 className="gap-2"
