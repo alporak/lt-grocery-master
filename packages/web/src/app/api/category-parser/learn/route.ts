@@ -1,0 +1,15 @@
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/db";
+import { runLearningAlgorithm } from "@/lib/categoryParser";
+
+export const dynamic = "force-dynamic";
+
+export async function POST() {
+  try {
+    const result = await runLearningAlgorithm(prisma);
+    return NextResponse.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}

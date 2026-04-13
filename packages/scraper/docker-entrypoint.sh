@@ -9,7 +9,7 @@ done
 
 # Migrate database schema to match current Prisma schema
 echo "[Scraper] Ensuring database schema is up to date..."
-DATABASE_URL=file:/app/data/grocery.db npx prisma db push --skip-generate --accept-data-loss 2>&1 || echo "[Scraper] Schema migration warning (non-fatal)"
+DATABASE_URL=file:/app/data/grocery.db npx prisma db push --skip-generate 2>&1 || echo "[Scraper] Schema migration warning (non-fatal)"
 
 echo "[Scraper] Starting..."
 exec npm start

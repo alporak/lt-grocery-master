@@ -257,11 +257,13 @@ export default function ProductsPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("products.allCategories")}</SelectItem>
-            {categories.map((c) => (
-              <SelectItem key={c.lt} value={language === "en" ? c.en : c.lt}>
-                {language === "en" ? c.en : c.lt}
-              </SelectItem>
-            ))}
+            {categories
+              .filter((c) => (language === "en" ? c.en : c.lt))
+              .map((c) => (
+                <SelectItem key={c.lt || c.en} value={language === "en" ? c.en : c.lt}>
+                  {language === "en" ? c.en : c.lt}
+                </SelectItem>
+              ))}
           </SelectContent>
         </Select>
         {groceryLists.length > 0 && (

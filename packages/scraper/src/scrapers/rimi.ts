@@ -219,51 +219,67 @@ export class RimiScraper extends BaseScraper {
     let unitLabel: string | undefined;
     let campaignText: string | undefined;
 
-    // 1. Extract unit price first (e.g., "9,90 €/kg")
-    const unitMatch = text.match(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt\.?|ml|gab)/i);
-    if (unitMatch) {
-      unitPrice = parseFloat(unitMatch[1].replace(",", "."));
-      unitLabel = `€/${unitMatch[2].replace(".", "")}`;
+    // 1. Strip deposit text (e.g. "Užstatas už tarą: 0,10 €")
+    const noDeposit = text.replace(/[Uu]žstatas[^€]+€/g, "");
+
+    // 2. Extract weight/volume unit price from original text — use last occurrence
+    //    so a sale item's regular unit price (not the sale unit price) wins.
+    const weightUnitMatches = [
+      ...text.matchAll(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|ml|gab)/gi),
+    ];
+    if (weightUnitMatches.length > 0) {
+      const last = weightUnitMatches[weightUnitMatches.length - 1];
+      unitPrice = parseFloat(last[1].replace(",", "."));
+      unitLabel = `€/${last[2]}`;
     }
 
-    // 2. Remove unit price text so it doesn't get confused with the package price
-    const cleaned = unitMatch ? text.replace(unitMatch[0], "") : text;
+    // 3. Build cleaned text:
+    //    - Remove ALL weight/volume unit prices (global replace, not just first)
+    //    - Normalise per-piece unit labels ("€/vnt.", "€/pcs.") → "€" so that
+    //      Rimi's split-layout price "2\n49\n€/vnt." becomes "2\n49\n€"
+    const cleaned = noDeposit
+      .replace(/\d+[.,]\d+\s*€\s*\/\s*(kg|l|ml|gab)/gi, "")
+      .replace(/€\s*\/\s*(vnt\.?|pcs\.?)/gi, "€");
 
-    // 3. Find all package prices in text order
-    //    Format A: "1,99 €" or "1.99 €" (with decimal separator)
-    //    Format B: "199€" or "099€"     (Rimi no-separator: last 2 digits = cents)
-    const allPrices: number[] = [];
-    const priceRegex = /(\d+[.,]\d{2})\s*€|(\d{3,})\s*€/g;
+    // 4. Collect package prices in text order.
+    //    Format A: "1,99 €" / "1.99 €"  — standard decimal
+    //    Format B: "1 99 €" / "1\n99 €" — Rimi split layout (euros + 2-digit cents)
+    const priceEntries: Array<{ value: number; index: number }> = [];
+
+    // Split format first
+    const splitRe = /\b(\d+)\s+(\d{2})\s*€/g;
     let m: RegExpExecArray | null;
-    while ((m = priceRegex.exec(cleaned)) !== null) {
-      if (m[1]) {
-        allPrices.push(parseFloat(m[1].replace(",", ".")));
-      } else if (m[2]) {
-        const raw = m[2];
-        const euros = raw.slice(0, -2) || "0";
-        const cents = raw.slice(-2);
-        allPrices.push(parseFloat(`${euros}.${cents}`));
+    while ((m = splitRe.exec(cleaned)) !== null) {
+      priceEntries.push({ value: parseFloat(`${m[1]}.${m[2]}`), index: m.index });
+    }
+
+    // Decimal format — skip positions already covered by a split match
+    const decRe = /(\d+[.,]\d+)\s*€/g;
+    while ((m = decRe.exec(cleaned)) !== null) {
+      const covered = priceEntries.some((e) => Math.abs(e.index - m!.index) < 6);
+      if (!covered) {
+        priceEntries.push({
+          value: parseFloat(m[1].replace(",", ".")),
+          index: m.index,
+        });
       }
     }
 
-    if (allPrices.length >= 1) {
-      regularPrice = allPrices[0];
+    priceEntries.sort((a, b) => a.index - b.index);
+    const prices = priceEntries.map((e) => e.value);
+
+    // 5. Assign prices: first = sale (if two found), last = regular
+    if (prices.length >= 1) regularPrice = prices[0];
+    if (prices.length >= 2) {
+      salePrice = prices[0];
+      regularPrice = prices[prices.length - 1];
     }
 
-    // 4. Discount: if % off and two prices found, first is sale, second is original
-    const discountMatch = text.match(/[–-](\d+)\s*%/);
-    if (discountMatch && allPrices.length >= 2) {
-      salePrice = allPrices[0];
-      regularPrice = allPrices[1];
-    }
-
-    // 5. Campaign text
+    // 6. Campaign text
     const campMatch = text.match(
       /([–-]\d+\s*%|\d+\s*\+\s*\d+|tik\s+[\d.,]+\s*€)/i
     );
-    if (campMatch) {
-      campaignText = campMatch[0];
-    }
+    if (campMatch) campaignText = campMatch[0];
 
     return { regularPrice, salePrice, unitPrice, unitLabel, campaignText };
   }

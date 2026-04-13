@@ -26,7 +26,9 @@
     "stores": "Parduotuvės",
     "scraper": "Nuskaitytuvas",
     "settings": "Nustatymai",
-    "categories": "Kategorijos"
+    "categories": "Kategorijos",
+    "categoryParser": "Kategorijų kūrėjas",
+    "manualEnrichment": "Rankinis praturtinimas"
   },
   "dashboard": {
     "title": "Pradžia",

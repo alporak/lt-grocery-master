@@ -7,14 +7,11 @@ services:
       - "3130:3130"
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
-      - LIBRETRANSLATE_URL=http://libretranslate:5000
       - EMBEDDER_URL=http://embedder:8000
       - PORT=3130
       - NODE_ENV=production
     volumes:
       - grocery-data:/app/data
-    depends_on:
-      - libretranslate
     restart: unless-stopped
 
   scraper:
@@ -23,14 +20,12 @@ services:
       dockerfile: packages/scraper/Dockerfile
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
-      - LIBRETRANSLATE_URL=http://libretranslate:5000
       - EMBEDDER_URL=http://embedder:8000
       - SCRAPE_HEADLESS=true
       - SCRAPE_INTERVAL_HOURS=24
     volumes:
       - grocery-data:/app/data
     depends_on:
-      - libretranslate
       - web
       - embedder
     restart: unless-stopped
@@ -57,24 +52,11 @@ services:
       - FIREWORKS_API_KEY=${FIREWORKS_API_KEY}
     volumes:
       - grocery-data:/app/data
-    depends_on:
-      - libretranslate
     deploy:
       resources:
         limits:
           memory: 2G
     restart: unless-stopped
 
-  libretranslate:
-    image: libretranslate/libretranslate:latest
-    ports:
-      - "5000:5000"
-    environment:
-      - LT_LOAD_ONLY=lt,en
-    volumes:
-      - lt-data:/home/libretranslate/.local
-    restart: unless-stopped
-
 volumes:
   grocery-data:
-  lt-data:

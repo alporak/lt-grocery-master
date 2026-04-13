@@ -57,6 +57,7 @@ model Product {
   enrichment   String?   // JSON blob from LLM enrichment
   enrichedAt   DateTime? // when LLM enrichment was last run
   enrichmentVersion Int? // version of enrichment prompt used
+  reviewedAt   DateTime? // set when a human manually approves this product
   productGroupId Int?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -74,6 +75,7 @@ model Product {
   @@index([subcategory])
   @@index([productGroupId])
   @@index([brand])
+  @@index([reviewedAt])
 }
 
 model ProductGroup {

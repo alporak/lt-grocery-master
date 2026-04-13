@@ -86,7 +86,7 @@ export default function StoresPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">{t("stores.allChains")}</SelectItem>
-            {chains.map((c) => (
+            {chains.filter(Boolean).map((c) => (
               <SelectItem key={c} value={c}>
                 {c}
               </SelectItem>

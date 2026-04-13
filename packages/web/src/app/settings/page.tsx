@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
-import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Database, Sparkles, Check, AlertCircle, Loader2, Languages, Brain, RotateCcw, Cpu, Wifi, WifiOff, Square } from "lucide-react";
+import { Save, RefreshCw, Sun, Moon, Droplets, MapPin, Database, Sparkles, Check, AlertCircle, Loader2, Languages, Brain, RotateCcw, Cpu, Wifi, WifiOff, Square, Globe } from "lucide-react";
 
 interface PipelineState {
   status: "idle" | "clearing" | "scraping" | "translating" | "enriching" | "done" | "error";
@@ -318,6 +318,9 @@ export default function SettingsPage() {
         // retranslate and translate are mutually exclusive
         if (phase === "retranslate") next.delete("translate");
         if (phase === "translate") next.delete("retranslate");
+        // scrape is mutually exclusive with all other phases
+        if (phase === "scrape") next.clear();
+        else next.delete("scrape");
         next.add(phase);
       }
       return next;
@@ -328,14 +331,22 @@ export default function SettingsPage() {
     if (selectedPhases.size === 0) return;
     setTriggering(true);
     try {
-      const res = await fetch("/api/admin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "run-phases", phases: [...selectedPhases] }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        await fetchPipelineStatus();
+      if (selectedPhases.has("scrape")) {
+        const res = await fetch("/api/admin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "scrape-only" }),
+        });
+        const data = await res.json();
+        if (data.success) await fetchPipelineStatus();
+      } else {
+        const res = await fetch("/api/admin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "run-phases", phases: [...selectedPhases] }),
+        });
+        const data = await res.json();
+        if (data.success) await fetchPipelineStatus();
       }
     } catch { /* ignore */ }
     setTriggering(false);
@@ -656,6 +667,37 @@ export default function SettingsPage() {
               </p>
 
               <div className="grid gap-2">
+                {/* Scrape stores */}
+                <button
+                  onClick={() => togglePhase("scrape")}
+                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                    selectedPhases.has("scrape")
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:border-primary/50"
+                  }`}
+                >
+                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
+                    selectedPhases.has("scrape") ? "bg-primary text-primary-foreground" : "bg-muted"
+                  }`}>
+                    <Globe className="h-4 w-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">
+                      {language === "lt" ? "Nuskaityti parduotuves" : "Scrape stores"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {language === "lt"
+                        ? "Nuskaityti kainas iš visų įjungtų parduotuvių"
+                        : "Fetch prices from all enabled stores (without clearing)"}
+                    </p>
+                  </div>
+                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                    selectedPhases.has("scrape") ? "border-primary bg-primary" : "border-muted-foreground/30"
+                  }`}>
+                    {selectedPhases.has("scrape") && <Check className="h-3 w-3 text-primary-foreground" />}
+                  </div>
+                </button>
+
                 {/* Translate untranslated */}
                 <button
                   onClick={() => togglePhase("translate")}

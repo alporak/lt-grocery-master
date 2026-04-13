@@ -40,13 +40,15 @@ RUN mkdir -p /app/.next/cache && chown -R nextjs:nodejs /app/.next
 COPY --from=builder /app/packages/web/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/packages/web/node_modules/@prisma ./node_modules/@prisma
 
+
 # Copy initialized database template
 COPY --from=builder /app/packages/web/init.db ./init.db
 
 # Copy static data files
 COPY data/store-locations.json ./store-locations.json
 
-# Create data directory
+# Copy migration script (uses @prisma/client already in node_modules)
+COPY packages/web/migrate-db.js ./migrate-db.js
 
 # Entrypoint
 COPY packages/web/docker-entrypoint.sh ./

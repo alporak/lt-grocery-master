@@ -269,6 +269,37 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, enrichStopped });
   }
 
+  if (action === "scrape-only") {
+    const requestedAt = new Date();
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: {
+        value: JSON.stringify({
+          trigger: "manual-scrape",
+          status: "scraping",
+          startedAt: requestedAt.toISOString(),
+          storesTotal: 0,
+          storesCompleted: 0,
+          productsScraped: 0,
+          currentStore: null,
+          finishedAt: null,
+          error: null,
+          updatedAt: requestedAt.toISOString(),
+        }),
+      },
+      create: {
+        key: "pipelineState",
+        value: JSON.stringify({ status: "scraping" }),
+      },
+    });
+    await prisma.settings.upsert({
+      where: { key: "scrapeRequested" },
+      update: { value: requestedAt.toISOString() },
+      create: { key: "scrapeRequested", value: requestedAt.toISOString() },
+    });
+    return NextResponse.json({ success: true, requestedAt: requestedAt.toISOString() });
+  }
+
   if (action === "redo-database") {
     const requestedAt = new Date();
 
