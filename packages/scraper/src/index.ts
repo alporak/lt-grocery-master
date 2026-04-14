@@ -13,6 +13,19 @@ async function getInterval(): Promise<number> {
   }
 }
 
+async function isScheduledScrapeEnabled(): Promise<boolean> {
+  try {
+    const setting = await prisma.settings.findUnique({
+      where: { key: "scheduledScrapeEnabled" },
+    });
+    if (!setting) return false;
+    const v = setting.value.replace(/^"|"$/g, "");
+    return v === "true";
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   console.log("[Scheduler] Starting scraper service...");
   let running = false;
@@ -38,10 +51,16 @@ async function main() {
     console.log(`[Scheduler] Cleaned up ${staleCount.count} stale 'running' log(s).`);
   }
 
-  // Run on startup only if any store actually needs scraping
+  // Run on startup only if scheduled scraping is enabled and stores need scraping
   setTimeout(async () => {
     if (running) return;
     try {
+      const enabled = await isScheduledScrapeEnabled();
+      if (!enabled) {
+        console.log("[Scheduler] Scheduled scraping disabled, skipping startup scrape.");
+        return;
+      }
+
       const intervalHours = await getInterval();
       const stores = await prisma.store.findMany({
         where: { enabled: true },
@@ -83,6 +102,12 @@ async function main() {
       return;
     }
     try {
+      const enabled = await isScheduledScrapeEnabled();
+      if (!enabled) {
+        console.log("[Scheduler] Scheduled scraping disabled, skipping.");
+        return;
+      }
+
       const intervalHours = await getInterval();
       const stores = await prisma.store.findMany({
         where: { enabled: true },

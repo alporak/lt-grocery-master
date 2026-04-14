@@ -246,6 +246,13 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "stop-all") {
+    // Signal the scraper process to stop after the current store finishes
+    await prisma.settings.upsert({
+      where: { key: "scrapeStopRequested" },
+      update: { value: "1" },
+      create: { key: "scrapeStopRequested", value: "1" },
+    });
+
     // Stop bulk enrichment
     const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
     let enrichStopped = false;
@@ -358,7 +365,11 @@ export async function POST(req: NextRequest) {
 
   if (action === "run-phases") {
     const phases: string[] = body.phases || [];
-    const validPhases = ["translate", "retranslate", "enrich", "reprocess"];
+    const enrichProvider: string = body.enrichProvider || "swarm";
+    const enrichProviders: string[] | undefined = Array.isArray(body.enrichProviders) ? body.enrichProviders : undefined;
+    const enrichProviderModels: Record<string, string> | undefined =
+      body.providerModels && typeof body.providerModels === "object" ? body.providerModels : undefined;
+    const validPhases = ["enrich", "reprocess"];
     const selected = phases.filter((p: string) => validPhases.includes(p));
 
     if (selected.length === 0) {
@@ -369,7 +380,7 @@ export async function POST(req: NextRequest) {
     const results: Record<string, unknown> = {};
 
     // Set pipeline state
-    const firstPhase = selected[0] === "retranslate" ? "translating" : selected[0] === "translate" ? "translating" : selected[0] === "enrich" ? "enriching" : "enriching";
+    const firstPhase = "enriching";
     await prisma.settings.upsert({
       where: { key: "pipelineState" },
       update: {
@@ -398,47 +409,28 @@ export async function POST(req: NextRequest) {
     });
 
     try {
-      // Phase: retranslate — clear existing translations first, then translate
-      if (selected.includes("retranslate")) {
-        await updatePipelineState("translating");
-        const ollamaConfig = await getOllamaConfig();
-        const providerConfig: TranslateProviderConfig | undefined = ollamaConfig.useOllama
-          ? { provider: "ollama", ollama_url: ollamaConfig.ollama_url, ollama_model: ollamaConfig.ollama_model }
-          : undefined;
-        const cleared = await prisma.product.updateMany({
-          data: { nameEn: null, categoryEn: null },
-        });
-        results.retranslateCleared = cleared.count;
-        const translateResult = await doTranslateProducts(providerConfig);
-        results.translate = translateResult;
-      }
-      // Phase: translate — only untranslated products
-      else if (selected.includes("translate")) {
-        await updatePipelineState("translating");
-        const ollamaConfig = await getOllamaConfig();
-        const providerConfig: TranslateProviderConfig | undefined = ollamaConfig.useOllama
-          ? { provider: "ollama", ollama_url: ollamaConfig.ollama_url, ollama_model: ollamaConfig.ollama_model }
-          : undefined;
-        const translateResult = await doTranslateProducts(providerConfig);
-        results.translate = translateResult;
-      }
-
-      // Phase: enrich — run embedder pipeline (embed + categorize + LLM enrich + group)
+      // Phase: enrich — run embedder pipeline (embed + LLM enrich + group + export)
       if (selected.includes("enrich") || selected.includes("reprocess")) {
         await updatePipelineState("enriching");
         const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
         const ollamaConfig = await getOllamaConfig();
-        const useBulkEnrich = !ollamaConfig.useOllama;
-        const endpoint = useBulkEnrich ? "/bulk-enrich" : "/process";
+
+        // Ollama uses /process; all other providers use /bulk-enrich with provider selection
+        const useOllamaProcess = ollamaConfig.useOllama;
+        const endpoint = useOllamaProcess ? "/process" : "/bulk-enrich";
+        const bodyPayload = useOllamaProcess
+          ? { provider: ollamaConfig.provider, ollama_url: ollamaConfig.ollama_url, ollama_model: ollamaConfig.ollama_model }
+          : {
+              provider: enrichProvider,
+              ...(enrichProviders ? { providers: enrichProviders } : {}),
+              ...(enrichProviderModels ? { provider_models: enrichProviderModels } : {}),
+            };
+
         try {
           const res = await fetch(`${embedderUrl}${endpoint}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              provider: ollamaConfig.provider,
-              ollama_url: ollamaConfig.ollama_url,
-              ollama_model: ollamaConfig.ollama_model,
-            }),
+            body: JSON.stringify(bodyPayload),
             signal: AbortSignal.timeout(600000),
           });
           if (res.ok) {

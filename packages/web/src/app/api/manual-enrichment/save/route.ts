@@ -40,6 +40,7 @@ export async function POST(req: NextRequest) {
           enrichment: JSON.stringify(enrichment),
           enrichedAt: new Date(),
           enrichmentVersion: ENRICH_VERSION,
+          enrichmentSource: "manual",
           // Only overwrite nameEn/brand/category if LLM provided a value
           ...(nameEn ? { nameEn } : {}),
           ...(brand ? { brand } : {}),

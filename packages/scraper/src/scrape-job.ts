@@ -44,7 +44,25 @@ async function updatePipelineState(update: Record<string, unknown>) {
   }
 }
 
+async function isStopRequested(): Promise<boolean> {
+  try {
+    const row = await prisma.settings.findUnique({ where: { key: "scrapeStopRequested" } });
+    return row?.value === "1";
+  } catch {
+    return false;
+  }
+}
+
+async function clearStopRequest(): Promise<void> {
+  try {
+    await prisma.settings.deleteMany({ where: { key: "scrapeStopRequested" } });
+  } catch { /* best-effort */ }
+}
+
 export async function runScrapeJob(storeSlugs?: string[]) {
+  // Clear any stale stop request before starting
+  await clearStopRequest();
+
   const stores = await prisma.store.findMany({
     where: {
       enabled: true,
@@ -66,6 +84,14 @@ export async function runScrapeJob(storeSlugs?: string[]) {
   });
 
   for (const store of stores) {
+    // Fast check between stores
+    if (await isStopRequested()) {
+      console.log("[ScrapeJob] Stop requested, halting scrape.");
+      await clearStopRequest();
+      await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString(), storesCompleted });
+      return;
+    }
+
     const createScraper = SCRAPER_MAP[store.slug];
     if (!createScraper) {
       console.log(`[ScrapeJob] No scraper for store: ${store.slug}`);
@@ -91,42 +117,53 @@ export async function runScrapeJob(storeSlugs?: string[]) {
       );
     }
 
-    // Create a log entry
     const log = await prisma.scrapeLog.create({
       data: { storeId: store.id, status: "running" },
     });
 
+    // Poll for stop every second — if requested, kill the Playwright browser immediately
+    let stopWatcher: ReturnType<typeof setInterval> | null = setInterval(async () => {
+      if (await isStopRequested()) {
+        try { await scraper.close(); } catch { /* ignore */ }
+      }
+    }, 1000);
+    const clearWatcher = () => {
+      if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
+    };
+
     try {
       const products = await scraper.run();
+      clearWatcher();
+
+      // If stop came in while run() was finishing, treat as interrupted
+      if (await isStopRequested()) {
+        await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "interrupted", finishedAt: new Date() } });
+        await clearStopRequest();
+        await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString(), storesCompleted });
+        return;
+      }
+
       await saveProducts(store.id, products);
-      await prisma.store.update({
-        where: { id: store.id },
-        data: { lastScrapedAt: new Date() },
-      });
-      await prisma.scrapeLog.update({
-        where: { id: log.id },
-        data: {
-          status: "success",
-          productCount: products.length,
-          finishedAt: new Date(),
-        },
-      });
+      await prisma.store.update({ where: { id: store.id }, data: { lastScrapedAt: new Date() } });
+      await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "success", productCount: products.length, finishedAt: new Date() } });
       totalProducts += products.length;
       storesCompleted++;
       await updatePipelineState({ storesCompleted, productsScraped: totalProducts });
-      console.log(
-        `[ScrapeJob] ${store.name}: saved ${products.length} products`
-      );
+      console.log(`[ScrapeJob] ${store.name}: saved ${products.length} products`);
     } catch (err) {
+      clearWatcher();
+
+      // Playwright throws when browser is closed mid-scrape — treat as interrupted if stop was requested
+      if (await isStopRequested()) {
+        console.log(`[ScrapeJob] ${store.name} interrupted by stop request.`);
+        await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "interrupted", finishedAt: new Date() } });
+        await clearStopRequest();
+        await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString(), storesCompleted });
+        return;
+      }
+
       const message = err instanceof Error ? err.message : String(err);
-      await prisma.scrapeLog.update({
-        where: { id: log.id },
-        data: {
-          status: "error",
-          errorMessage: message.substring(0, 500),
-          finishedAt: new Date(),
-        },
-      });
+      await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "error", errorMessage: message.substring(0, 500), finishedAt: new Date() } });
       storesCompleted++;
       await updatePipelineState({ storesCompleted });
       console.error(`[ScrapeJob] ${store.name} failed:`, err);

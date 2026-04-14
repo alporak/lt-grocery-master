@@ -13,7 +13,7 @@ export async function GET(req: NextRequest) {
   ] = await Promise.all([
     prisma.product.count(),
     prisma.product.count({ where: { canonicalCategory: { not: null } } }),
-    prisma.product.count({ where: { enrichedAt: { not: null } } }),
+    prisma.product.count({ where: { enrichment: { not: null } } }),
   ]);
 
   // Query embedder health for embedding count

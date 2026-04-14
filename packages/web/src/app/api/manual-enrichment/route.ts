@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   const where: Record<string, any> = {};
 
   if (mode === "unenriched") {
-    where.enrichedAt = null;
+    where.enrichment = null;
   }
 
   if (storeId) {
@@ -32,6 +32,8 @@ export async function GET(req: NextRequest) {
         brand: true,
         canonicalCategory: true,
         enrichedAt: true,
+        enrichment: true,
+        enrichmentSource: true,
         imageUrl: true,
         store: { select: { id: true, name: true, chain: true } },
         priceRecords: {
@@ -44,7 +46,7 @@ export async function GET(req: NextRequest) {
       take: batchSize,
       orderBy: { createdAt: "asc" },
     }),
-    prisma.product.count({ where: { enrichedAt: null } }),
+    prisma.product.count({ where: { enrichment: null } }),
     prisma.product.count(),
   ]);
 

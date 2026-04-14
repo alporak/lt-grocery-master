@@ -54,10 +54,11 @@ model Product {
   searchIndex  String?   // normalized lowercase no-diacritics name for search
   canonicalCategory String? // embedder-assigned normalized category ID
   subcategory  String?   // more specific type within category (e.g. "sparkling water")
-  enrichment   String?   // JSON blob from LLM enrichment
-  enrichedAt   DateTime? // when LLM enrichment was last run
-  enrichmentVersion Int? // version of enrichment prompt used
-  reviewedAt   DateTime? // set when a human manually approves this product
+  enrichment        String?   // JSON blob from LLM enrichment
+  enrichedAt        DateTime? // when LLM enrichment was last run
+  enrichmentVersion Int?      // version of enrichment prompt used
+  enrichmentSource  String?   // "auto" (swarm/Gemini) | "manual" (copy-paste workflow)
+  reviewedAt        DateTime? // set when a human manually approves this product
   productGroupId Int?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

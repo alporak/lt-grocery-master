@@ -7,13 +7,13 @@ Endpoints:
   POST /search        — semantic search: query → ranked product IDs
   POST /categorize    — assign canonical categories to products
   POST /enrich        — LLM-enrich new products via Groq
-  POST /process       — full pipeline: embed → categorize → enrich → export
+    POST /process       — full pipeline: embed → enrich → group → export
   POST /export        — export product-intelligence.json.gz
   POST /import        — import from product-intelligence artifact
   GET  /health        — readiness check
 """
 
-import json, gzip, base64, os, time, sqlite3, logging, asyncio, unicodedata
+import json, gzip, base64, os, time, sqlite3, logging, asyncio, unicodedata, re
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -50,9 +50,21 @@ OLLAMA_PARALLEL_REQUESTS = int(os.getenv("OLLAMA_PARALLEL_REQUESTS", "2"))
 
 
 # --- Gemini config ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-3.1-flash"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/v1/chat/completions"
+# Support up to 3 Gemini API keys — each key spawns an independent swarm worker
+GEMINI_API_KEYS: list[str] = [
+    k for k in [
+        os.getenv("GEMINI_API_KEY", ""),
+        os.getenv("GEMINI2_API_KEY", ""),
+        os.getenv("GEMINI3_API_KEY", ""),
+    ]
+    if k
+]
+GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""  # keep for compat
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+GEMINI_BATCH_SIZE = int(os.getenv("GEMINI_BATCH_SIZE", "250"))
+GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))   # 0 = disabled (fastest)
+GEMINI_WAIT_SECONDS = int(os.getenv("GEMINI_WAIT_SECONDS", "180"))       # 3 min between runs
+GEMINI_RPM = int(os.getenv("GEMINI_RPM", "10"))                          # free tier: 10 RPM/key
 
 # --- Global state ---
 model = None  # SentenceTransformer, loaded at startup
@@ -176,8 +188,29 @@ async def lifespan(app: FastAPI):
     if len(product_ids) == 0 and EXPORT_PATH.exists():
         log.info("No local embeddings found, importing from artifact...")
         _do_import()
+    _gemini_state["scheduler_active"] = False
+    # Reset products that were marked as attempted (enrichedAt set) but have no actual data
+    # These were falsely marked by the old failure-handling code and should be retried
+    try:
+        conn = get_db_rw()
+        result = conn.execute(
+            "UPDATE Product SET enrichedAt = NULL, enrichmentVersion = NULL "
+            "WHERE enrichment IS NULL AND enrichedAt IS NOT NULL"
+        )
+        count = result.rowcount
+        conn.commit()
+        conn.close()
+        if count > 0:
+            log.info(f"[Startup] Reset {count} products with missing enrichment data — will retry")
+    except Exception as e:
+        log.warning(f"[Startup] Cleanup query failed: {e}")
+    if GEMINI_API_KEYS:
+        log.info(f"[Gemini] {len(GEMINI_API_KEYS)} API key(s) configured. Use /bulk-enrich to start enrichment.")
+    else:
+        log.info("[Gemini] No API keys configured")
     yield
     log.info("Shutting down")
+    _gemini_state["scheduler_active"] = False
 
 
 app = FastAPI(title="Grocery Embedder", lifespan=lifespan)
@@ -579,16 +612,13 @@ class ProcessRequest(BaseModel):
 
 @app.post("/process")
 async def process(req: ProcessRequest | None = None):
-    """Full pipeline: embed new products → categorize → enrich → group → export."""
+    """Full pipeline: embed new products → enrich → group → export."""
     results = {}
 
     # Step 1: Embed new/updated products
     results["embed"] = _embed_new_products()
 
-    # Step 2: Categorize uncategorized products
-    results["categorize"] = _categorize_new_products()
-
-    # Step 3: LLM enrichment (provider determined by request or env)
+    # Step 2: LLM enrichment (provider determined by request or env)
     provider = (req.provider if req else None) or "groq"
     has_llm = (
         (provider == "ollama" and ((req and req.ollama_url) or OLLAMA_URL))
@@ -608,10 +638,10 @@ async def process(req: ProcessRequest | None = None):
     else:
         results["enrich"] = {"skipped": True, "reason": f"No {provider} configuration available"}
 
-    # Step 4: Group similar products
+    # Step 3: Group similar products
     results["group"] = _do_grouping()
 
-    # Step 5: Export
+    # Step 4: Export
     results["export"] = _do_export()
 
     return results
@@ -733,13 +763,15 @@ _bulk_enrich_state = {
     "finished_at": None,
 }
 
-# 11 Different Endpoints — upgraded to 70b-class models for maximum accuracy
-MULTI_PROVIDERS = [
-    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://api.groq.com/openai/v1/chat/completions",       "model": "llama-3.3-70b-versatile",              "rpm": 30, "json_mode": True},
-    {"name": "Groq2",      "env": "GROQ2_API_KEY",      "url": "https://api.groq.com/openai/v1/chat/completions",       "model": "llama-3.3-70b-versatile",              "rpm": 30, "json_mode": True},
-    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY", "url": "https://openrouter.ai/api/v1/chat/completions",         "model": "meta-llama/llama-3.3-70b-instruct:free","rpm": 20, "json_mode": False},
-    {"name": "NVIDIA NIM", "env": "NVIDIA_API_KEY",     "url": "https://integrate.api.nvidia.com/v1/chat/completions",  "model": "meta/llama-3.3-70b-instruct",          "rpm": 40, "json_mode": False},
-    {"name": "GitHub",     "env": "GITHUB_TOKEN",       "url": "https://models.inference.ai.azure.com/chat/completions","model": "Meta-Llama-3.1-405B-Instruct",         "rpm": 15, "json_mode": True},
+# Available models per provider (first = default)
+# Swarm uses Gemini workers only
+MULTI_PROVIDERS: list[dict] = []
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash-preview-04-17",
+    "gemini-2.5-pro-preview-03-25",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
 ]
 
 # Valid canonical category IDs — LLM must pick one of these
@@ -828,25 +860,25 @@ def _validate_canonical_category(cat: str | None) -> str | None:
     return None
 
 
-def _db_save_batch(rows: list, items: list):
-    """Save enrichment results to DB, extracting fields from v2 enrichment."""
+def _db_save_batch(rows: list, items: list, source: str = "auto"):
+    """Save successful enrichment results to DB. Only saves rows that have valid LLM data.
+    Failed/empty items are silently skipped — they remain unenriched and will be retried."""
     conn = get_db_rw()
     try:
         for i, row in enumerate(rows):
             if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i]:
                 item = items[i]
-                # Extract structured fields from v2 enrichment
                 name_clean = item.get("name_clean") or None
                 brand = _normalize_brand(item.get("brand"))
                 canonical_cat = _validate_canonical_category(item.get("canonical_category"))
                 subcategory = item.get("subcategory") or None
 
-                # Build update query — only overwrite brand if not already set
                 conn.execute(
                     """UPDATE Product SET
                         enrichment = ?,
                         enrichedAt = datetime('now'),
                         enrichmentVersion = ?,
+                        enrichmentSource = ?,
                         nameEn = COALESCE(NULLIF(?, ''), nameEn),
                         brand = COALESCE(NULLIF(?, ''), brand),
                         canonicalCategory = COALESCE(NULLIF(?, ''), canonicalCategory),
@@ -855,6 +887,7 @@ def _db_save_batch(rows: list, items: list):
                     (
                         json.dumps(item),
                         ENRICH_VERSION,
+                        source,
                         name_clean,
                         brand,
                         canonical_cat,
@@ -862,30 +895,264 @@ def _db_save_batch(rows: list, items: list):
                         row["id"],
                     )
                 )
-            else:
-                # Mark as attempted so it doesn't loop forever on persistent LLM failure
-                conn.execute(
-                    "UPDATE Product SET enrichedAt = datetime('now'), enrichmentVersion = ? WHERE id = ?",
-                    (ENRICH_VERSION, row["id"])
-                )
         conn.commit()
     finally:
         conn.close()
 
-async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict):
+# --- Gemini auto-enrichment ---
+
+_gemini_state: dict = {
+    "scheduler_active": False,
+    "running": False,
+    "total_enriched": 0,
+    "last_run_at": None,
+    "last_run_enriched": 0,
+    "last_run_failed": 0,
+    "error": None,
+}
+
+
+async def _gemini_call(api_key: str, rows: list) -> tuple[list, str | None]:
+    """Call Gemini API for a batch of rows. Returns (items, error_msg).
+    Uses google-genai SDK. Products NOT marked in DB on failure — caller handles retries."""
+    from google import genai
+    from google.genai import types
+
+    lines = [f"Product {i+1}: {_build_product_text(row)}" for i, row in enumerate(rows)]
+    user_prompt = "\n".join(lines)
+
+    cfg_kwargs: dict = {
+        "system_instruction": BULK_ENRICH_SYSTEM_PROMPT,
+        "temperature": 1.0,
+        "max_output_tokens": 65536,
+        "response_mime_type": "application/json",
+    }
+    if GEMINI_THINKING_BUDGET > 0:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=GEMINI_THINKING_BUDGET)
+
+    client = genai.Client(api_key=api_key)
+    try:
+        response = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(**cfg_kwargs),
+        )
+        text = response.text
+        parsed = json.loads(text)
+        items = parsed.get("results", [])
+        if not isinstance(items, list):
+            items = [parsed]
+        return items, None
+    except Exception as e:
+        return [], str(e)
+
+
+async def _gemini_enrich_batch(rows: list) -> tuple[int, int, str | None]:
+    """Single-key Gemini batch (used by scheduler and run-once). Returns (enriched, failed, error)."""
+    if not GEMINI_API_KEY:
+        return 0, len(rows), "No GEMINI_API_KEY configured"
+    items, err = await _gemini_call(GEMINI_API_KEY, rows)
+    if err:
+        log.error(f"[Gemini] Batch error: {err}")
+        return 0, len(rows), err
+    _db_save_batch(rows, items, source="auto")
+    enriched = sum(1 for i, r in enumerate(rows) if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i])
+    failed = len(rows) - enriched
+    log.info(f"[Gemini] Enriched {enriched} products ({failed} mismatched/failed — will retry).")
+    return enriched, failed, None
+
+
+async def _gemini_worker(api_key: str, worker_id: int, queue: asyncio.Queue, state: dict):
+    """Queue-based Gemini worker. One per API key. Shares queue with other workers."""
+    label = f"Gemini-{worker_id}"
+    log.info(f"[{label}] Worker started (model={GEMINI_MODEL}, ~{GEMINI_RPM} RPM)")
+    state["active_workers"] += 1
+    delay = (60.0 / GEMINI_RPM) * 1.5  # conservative pacing
+
+    while state["running"]:
+        try:
+            batch = await queue.get()
+        except asyncio.CancelledError:
+            break
+
+        rows = batch["rows"]
+        retries = batch.get("retries", 0)
+
+        if retries > 3:
+            log.warning(f"[{label}] Batch dropped after 3 retries — products will retry next run")
+            state["failed"] += len(rows)
+            queue.task_done()
+            continue
+
+        items, err = await _gemini_call(api_key, rows)
+
+        if err:
+            log.warning(f"[{label}] Error (retry {retries+1}/3): {err[:120]}")
+            await queue.put({"rows": rows, "retries": retries + 1})
+            queue.task_done()
+            await asyncio.sleep(delay * 2)
+            continue
+
+        _db_save_batch(rows, items, source="auto")
+        enriched = sum(1 for i, r in enumerate(rows) if i < len(items) and isinstance(items[i], dict) and "name_clean" in items[i])
+        state["done"] += enriched
+        state["failed"] += (len(rows) - enriched)
+        log.info(f"[{label}] Enriched {enriched}/{len(rows)} products ({state['done']}/{state['total']} total)")
+        queue.task_done()
+        await asyncio.sleep(delay)
+
+    state["active_workers"] -= 1
+    log.info(f"[{label}] Worker stopped")
+
+
+async def _gemini_scheduler():
+    """Background loop: fetch GEMINI_BATCH_SIZE unenriched products → Gemini → wait → repeat."""
+    global _gemini_state
+    log.info("[Gemini Scheduler] Started")
+    _gemini_state["scheduler_active"] = True
+
+    while _gemini_state["scheduler_active"]:
+        if not GEMINI_API_KEY:
+            log.warning("[Gemini Scheduler] GEMINI_API_KEY not set, checking again in 60s")
+            await asyncio.sleep(60)
+            continue
+
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product "
+            "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ? LIMIT ?",
+            (ENRICH_VERSION, GEMINI_BATCH_SIZE),
+        ).fetchall()
+        conn.close()
+        rows = [dict(r) for r in rows]
+
+        if not rows:
+            log.info("[Gemini Scheduler] Nothing to enrich, checking again in 3 min")
+            await asyncio.sleep(GEMINI_WAIT_SECONDS)
+            continue
+
+        log.info(f"[Gemini Scheduler] Enriching {len(rows)} products…")
+        _gemini_state["running"] = True
+        _gemini_state["last_run_at"] = time.time()
+        _gemini_state["error"] = None
+
+        enriched, failed, err_msg = await _gemini_enrich_batch(rows)
+
+        _gemini_state["running"] = False
+        _gemini_state["total_enriched"] += enriched
+        _gemini_state["last_run_enriched"] = enriched
+        _gemini_state["last_run_failed"] = failed
+        if err_msg:
+            _gemini_state["error"] = err_msg
+
+        log.info(f"[Gemini Scheduler] Run done — enriched {enriched}, failed {failed}. Waiting {GEMINI_WAIT_SECONDS}s…")
+        await asyncio.sleep(GEMINI_WAIT_SECONDS)
+
+    log.info("[Gemini Scheduler] Stopped")
+
+
+async def _gemini_run_batch_once():
+    """Single Gemini enrichment batch — used by manual trigger and swarm mode."""
+    global _gemini_state
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product "
+        "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ? LIMIT ?",
+        (ENRICH_VERSION, GEMINI_BATCH_SIZE),
+    ).fetchall()
+    conn.close()
+    rows = [dict(r) for r in rows]
+    if not rows:
+        return
+    _gemini_state["running"] = True
+    _gemini_state["last_run_at"] = time.time()
+    _gemini_state["error"] = None
+    enriched, failed, err_msg = await _gemini_enrich_batch(rows)
+    _gemini_state["running"] = False
+    _gemini_state["total_enriched"] += enriched
+    _gemini_state["last_run_enriched"] = enriched
+    _gemini_state["last_run_failed"] = failed
+    if err_msg:
+        _gemini_state["error"] = err_msg
+
+
+def _extract_json_object(text: str) -> str | None:
+    """Extract first complete JSON object from text, tolerant of extra prose/fences."""
+    if not text:
+        return None
+
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\\s*", "", s, flags=re.IGNORECASE)
+        if s.endswith("```"):
+            s = s[:-3].strip()
+    if s.lower().startswith("json"):
+        s = s[4:].strip()
+
+    start = s.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(s[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i + 1]
+
+    return None
+
+
+def _parse_llm_json_payload(content: str) -> dict | None:
+    """Parse JSON object from LLM response text with light recovery."""
+    try:
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    obj = _extract_json_object(content)
+    if not obj:
+        return None
+
+    try:
+        parsed = json.loads(obj)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict, model_override: str | None = None):
     """Pulls batches from the queue and hits a specific free API."""
     api_key = os.getenv(provider["env"])
     if not api_key:
         log.info(f"Skipping {provider['name']} worker: {provider['env']} missing.")
         return
 
-    log.info(f"Deployed {provider['name']} worker (Model: {provider['model']}, Limit: {provider['rpm']} RPM)")
+    model_name = model_override or provider["model"]
+    log.info(f"Deployed {provider['name']} worker (Model: {model_name}, Limit: {provider['rpm']} RPM)")
     state["active_workers"] += 1
-    
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    
-    # Calculate the exact delay needed to respect this provider's free RPM limits
-    delay = 60.0 / provider["rpm"]
+
+    # 1.5× safety factor — slow but steady, avoids rate limit cascades
+    delay = (60.0 / provider["rpm"]) * 1.5
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         while state["running"]:
@@ -898,9 +1165,8 @@ async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict):
             retries = batch.get("retries", 0)
 
             if retries > 3:
-                log.warning(f"Batch failed after 3 retries on {provider['name']}. Dropping.")
+                log.warning(f"[{provider['name']}] Batch dropped after 3 retries — products will retry next run")
                 state["failed"] += len(rows)
-                _db_save_batch(rows, []) 
                 queue.task_done()
                 continue
 
@@ -909,7 +1175,7 @@ async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict):
             user_prompt = "\n".join(lines)
 
             payload = {
-                "model": provider["model"],
+                "model": model_name,
                 "messages":[
                     {"role": "system", "content": BULK_ENRICH_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
@@ -940,12 +1206,9 @@ async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict):
                     continue
 
                 content = resp.json()["choices"][0]["message"]["content"]
-                
-                # Strip markdown codeblocks common in open models
-                if "```json" in content: content = content.split("```json")[1].split("```")[0].strip()
-                elif "```" in content: content = content.split("```")[1].split("```")[0].strip()
-
-                parsed = json.loads(content)
+                parsed = _parse_llm_json_payload(content)
+                if parsed is None:
+                    raise ValueError("Could not parse LLM JSON response")
                 items = parsed.get("results",[])
                 
                 # Fallback for weirdly formatted JSON
@@ -968,13 +1231,37 @@ async def _api_worker(provider: dict, queue: asyncio.Queue, state: dict):
     state["active_workers"] -= 1
 
 def _has_multi_provider_keys() -> bool:
-    return any(os.getenv(provider["env"]) for provider in MULTI_PROVIDERS)
+    return bool(GEMINI_API_KEYS)
+
+
+@app.get("/providers")
+async def list_providers():
+    """List Gemini worker slots (one per configured API key)."""
+    workers = [
+        {
+            "name": f"Gemini-{i + 1}",
+            "configured": True,
+            "default_model": GEMINI_MODEL,
+            "models": GEMINI_MODELS,
+            "rpm": GEMINI_RPM,
+        }
+        for i in range(len(GEMINI_API_KEYS))
+    ]
+    if not workers:
+        workers = [{
+            "name": "Gemini-1",
+            "configured": False,
+            "default_model": GEMINI_MODEL,
+            "models": GEMINI_MODELS,
+            "rpm": GEMINI_RPM,
+        }]
+    return {"providers": workers}
 
 
 async def _run_bulk_enrich() -> dict:
     global _bulk_enrich_state
-    if not _has_multi_provider_keys():
-        return {"skipped": True, "reason": "No multi-provider API keys configured"}
+    if not GEMINI_API_KEYS:
+        return {"skipped": True, "reason": "No Gemini API keys configured"}
 
     _bulk_enrich_state = {
         "running": True,
@@ -992,80 +1279,106 @@ async def _run_bulk_enrich() -> dict:
         "enriched": _bulk_enrich_state["done"],
         "failed": _bulk_enrich_state["failed"],
         "total_pending": _bulk_enrich_state["total"],
-        "active_workers": _bulk_enrich_state["active_workers"],
+        "workers": len(GEMINI_API_KEYS),
         "error": _bulk_enrich_state["error"],
-        "providers": [provider["name"] for provider in MULTI_PROVIDERS if os.getenv(provider["env"])],
     }
 
 
-async def _bulk_enrich_manager():
-    """Coordinates the queue and the dynamic worker swarm."""
+async def _bulk_enrich_manager(keys: list[str] | None = None, provider_list: list | None = None, provider_models: dict | None = None):
+    """Coordinates the Gemini swarm queue. keys: list of Gemini API keys to use."""
     global _bulk_enrich_state
     state = _bulk_enrich_state
-    
+    active_keys = keys if keys is not None else GEMINI_API_KEYS
+
     conn = get_db()
     rows = conn.execute(
         "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product "
-        "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ?"
-        , (ENRICH_VERSION,)
+        "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ?",
+        (ENRICH_VERSION,)
     ).fetchall()
     conn.close()
 
     total = len(rows)
     state["total"] = total
-    
+
     if total == 0:
-        log.info("No products need enrichment.")
+        log.info("[Coordinator] No products need enrichment.")
         state["running"] = False
         state["finished_at"] = time.time()
         return
 
-    # 1. Fill Queue (Batching 15 products per prompt)
-    queue = asyncio.Queue()
+    if not active_keys:
+        state["error"] = "No Gemini API keys configured."
+        state["running"] = False
+        return
+
+    # Fill queue — 15 products per batch
+    queue: asyncio.Queue = asyncio.Queue()
     batch_size = 15
     for i in range(0, total, batch_size):
         chunk = [dict(r) for r in rows[i:i + batch_size]]
         queue.put_nowait({"rows": chunk, "retries": 0})
 
-    log.info(f"[Coordinator] Queued {queue.qsize()} batches. Waking up the swarm...")
+    log.info(f"[Coordinator] {queue.qsize()} batches queued, {len(active_keys)} Gemini worker(s)...")
 
-    # 2. Spawn Workers based on available API Keys
-    workers =[]
-    for provider in MULTI_PROVIDERS:
-        if os.getenv(provider["env"]):
-            worker_task = asyncio.create_task(_api_worker(provider, queue, state))
-            workers.append(worker_task)
+    # Spawn one worker per API key
+    workers = [
+        asyncio.create_task(_gemini_worker(key, i + 1, queue, state))
+        for i, key in enumerate(active_keys)
+    ]
 
-    if not workers:
-        state["error"] = "No API keys found. You must set at least one provider key (e.g., GROQ_API_KEY) in the environment."
-        state["running"] = False
-        return
-
-    # 3. Wait for the queue to drain
     await queue.join()
 
-    # 4. Clean up and report
     state["running"] = False
     state["finished_at"] = time.time()
-    
     for w in workers:
         w.cancel()
-    
-    log.info(f"[Coordinator] Swarm Finished! Total completed: {state['done']}, Failed: {state['failed']}")
+    log.info(f"[Coordinator] Done — enriched: {state['done']}, failed: {state['failed']}")
+
+class BulkEnrichRequest(BaseModel):
+    # Optionally limit to specific Gemini worker indices (1-based)
+    worker_indices: list[int] | None = None
+    # Also accepts "Gemini-1", "Gemini-2", etc. from the frontend provider list
+    providers: list[str] | None = None
+    # Legacy fields (ignored in Gemini-only mode)
+    provider: str = "swarm"
+    provider_models: dict[str, str] | None = None
 
 @app.post("/bulk-enrich")
-async def bulk_enrich():
+async def bulk_enrich(req: BulkEnrichRequest = BulkEnrichRequest()):
     global _bulk_enrich_state
     if _bulk_enrich_state["running"]:
         return {"error": "Swarm is already running"}
 
+    if not GEMINI_API_KEYS:
+        return {"error": "No Gemini API keys configured (GEMINI_API_KEY, GEMINI2_API_KEY, GEMINI3_API_KEY)"}
+
+    # Resolve keys from providers list ("Gemini-1" → index 1) or worker_indices
+    if req.providers:
+        indices = []
+        for name in req.providers:
+            if name.lower().startswith("gemini-"):
+                try:
+                    indices.append(int(name.split("-")[1]))
+                except (IndexError, ValueError):
+                    pass
+        keys = [GEMINI_API_KEYS[i - 1] for i in indices if 0 < i <= len(GEMINI_API_KEYS)] if indices else GEMINI_API_KEYS
+    elif req.worker_indices:
+        keys = [GEMINI_API_KEYS[i - 1] for i in req.worker_indices if 0 < i <= len(GEMINI_API_KEYS)]
+    else:
+        keys = GEMINI_API_KEYS
+
+    if not keys:
+        return {"error": "No valid worker indices"}
+
     _bulk_enrich_state = {
-        "running": True, "total": 0, "done": 0, "failed": 0, 
+        "running": True, "total": 0, "done": 0, "failed": 0,
         "active_workers": 0, "error": None, "started_at": time.time(), "finished_at": None,
     }
 
-    asyncio.create_task(_bulk_enrich_manager())
-    return {"status": "Swarm deployed", "message": "Check /bulk-enrich/status for live progress"}
+    asyncio.create_task(_bulk_enrich_manager(keys=keys))
+    label = ", ".join(f"Gemini-{i+1}" for i in range(len(keys)))
+    return {"status": f"Deployed ({label})", "message": "Check /bulk-enrich/status for progress"}
 
 @app.post("/bulk-enrich/stop")
 async def bulk_enrich_stop():
@@ -1078,6 +1391,53 @@ async def bulk_enrich_stop():
 @app.get("/bulk-enrich/status")
 async def bulk_enrich_status():
     return _bulk_enrich_state
+
+
+# --- Gemini enrichment endpoints ---
+
+@app.get("/gemini-enrich/status")
+async def gemini_enrich_status():
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM Product WHERE enrichmentVersion IS NULL OR enrichmentVersion < ?",
+        (ENRICH_VERSION,)
+    ).fetchone()[0]
+    conn.close()
+    return {
+        **_gemini_state,
+        "model": GEMINI_MODEL,
+        "batch_size": GEMINI_BATCH_SIZE,
+        "thinking_budget": GEMINI_THINKING_BUDGET,
+        "wait_seconds": GEMINI_WAIT_SECONDS,
+        "pending_count": pending,
+        "configured": bool(GEMINI_API_KEY),
+    }
+
+@app.post("/gemini-enrich/start")
+async def gemini_enrich_start():
+    return {
+        "error": "Gemini scheduler start is disabled",
+        "message": "Use /bulk-enrich from Data Processing to trigger enrichment as a single background action",
+    }
+
+@app.post("/gemini-enrich/stop")
+async def gemini_enrich_stop():
+    global _gemini_state
+    if not _gemini_state["scheduler_active"]:
+        return {"stopped": False, "reason": "not running"}
+    _gemini_state["scheduler_active"] = False
+    return {"stopped": True}
+
+@app.post("/gemini-enrich/run-once")
+async def gemini_enrich_run_once():
+    """Trigger a single enrichment batch immediately (non-blocking)."""
+    if _gemini_state["running"]:
+        return {"error": "Batch already in progress"}
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY not configured"}
+    asyncio.create_task(_gemini_run_batch_once())
+    return {"status": "triggered", "batch_size": GEMINI_BATCH_SIZE}
+
 
 # --- Product Grouping ---
 

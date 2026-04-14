@@ -33,6 +33,7 @@ import {
   RefreshCw,
   Save,
   Cpu,
+  Square,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -40,6 +41,8 @@ import {
 interface LoadedProduct extends ProductForPrompt {
   canonicalCategory: string | null;
   enrichedAt: string | null;
+  enrichment: string | null;   // JSON blob if auto-enriched
+  enrichmentSource: string | null; // "auto" | "manual" | null
   imageUrl: string | null;
   store: { id: number; name: string; chain: string };
   latestPrice: { regularPrice: number; salePrice: number | null } | null;
@@ -55,6 +58,17 @@ interface SaveResult {
   saved: number;
   skipped: number;
   errors: string[];
+}
+
+interface BulkEnrichStatus {
+  running: boolean;
+  total: number;
+  done: number;
+  failed: number;
+  active_workers: number;
+  error: string | null;
+  started_at: number | null;
+  finished_at: number | null;
 }
 
 type Step = "config" | "prompt" | "paste" | "preview" | "saved";
@@ -93,6 +107,7 @@ export default function ManualEnrichmentPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState<string | null>(null);
+  const [bulkStatus, setBulkStatus] = useState<BulkEnrichStatus | null>(null);
 
   // Step tracking
   const [step, setStep] = useState<Step>("config");
@@ -131,6 +146,28 @@ export default function ManualEnrichmentPage() {
       .then((r) => r.json())
       .then((d) => setStores(Array.isArray(d) ? d : d.stores ?? []))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchBulkStatus = async () => {
+      try {
+        const res = await fetch("/api/bulk-enrich", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json() as BulkEnrichStatus;
+        if (!cancelled) setBulkStatus(data);
+      } catch {
+        if (!cancelled) setBulkStatus(null);
+      }
+    };
+
+    fetchBulkStatus();
+    const timer = setInterval(fetchBulkStatus, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
   // ── Load batch ──────────────────────────────────────────────────────
@@ -200,6 +237,21 @@ export default function ManualEnrichmentPage() {
 
   const userMessage = products.length > 0 ? buildUserMessage(products) : "";
   const fullPrompt = products.length > 0 ? buildFullPrompt(products) : "";
+  const statusTotal = bulkStatus?.total ?? 0;
+  const statusProcessed = (bulkStatus?.done ?? 0) + (bulkStatus?.failed ?? 0);
+  // Progress % = successfully enriched / total (not including failures)
+  const statusPct = statusTotal > 0 ? Math.min(100, Math.round(((bulkStatus?.done ?? 0) / statusTotal) * 100)) : 0;
+  const hasFailed = (bulkStatus?.failed ?? 0) > 0;
+
+  const stopEnrichment = async () => {
+    try {
+      await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop-all" }),
+      });
+    } catch { /* ignore */ }
+  };
 
   // ── Copy helpers ────────────────────────────────────────────────────
 
@@ -381,6 +433,75 @@ export default function ManualEnrichmentPage() {
         })}
       </div>
 
+      {/* ── Live enrichment status ───────────────────────────────────── */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Enrichment Status</p>
+              <div className="flex items-center gap-2 text-sm">
+                {bulkStatus?.running ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    <span className="font-medium text-primary">Running</span>
+                    <button
+                      onClick={stopEnrichment}
+                      className="flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
+                    >
+                      <Square className="h-2.5 w-2.5" /> Stop
+                    </button>
+                  </>
+                ) : (
+                  <span className="font-medium text-muted-foreground">
+                    {!bulkStatus?.running && hasFailed && statusTotal > 0 ? (
+                      <span className="text-amber-600">Done with {bulkStatus?.failed} failures — products will retry next run</span>
+                    ) : "Idle"}
+                  </span>
+                )}
+                {bulkStatus?.error && <span className="text-destructive text-xs">• {bulkStatus.error}</span>}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-5 text-xs">
+              <div>
+                <p className="text-muted-foreground">Processed</p>
+                <p className="font-mono">{statusProcessed} / {statusTotal}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">Done</p>
+                <p className="font-mono text-green-600">{bulkStatus?.done ?? 0}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">Failed</p>
+                <p className={`font-mono ${hasFailed ? "text-amber-600" : "text-muted-foreground"}`}>{bulkStatus?.failed ?? 0}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">Workers</p>
+                <p className="font-mono">{bulkStatus?.active_workers ?? 0}</p>
+              </div>
+            </div>
+          </div>
+
+          {statusTotal > 0 && (
+            <div className="mt-3 space-y-1">
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>Progress (enriched)</span>
+                <span>{statusPct}%{hasFailed ? ` · ${bulkStatus?.failed} failed` : ""}</span>
+              </div>
+              <div className="h-2 rounded-full bg-muted overflow-hidden flex">
+                <div className="h-full bg-primary transition-all duration-500" style={{ width: `${statusPct}%` }} />
+                {hasFailed && statusTotal > 0 && (
+                  <div
+                    className="h-full bg-amber-400 transition-all duration-500"
+                    style={{ width: `${Math.round(((bulkStatus?.failed ?? 0) / statusTotal) * 100)}%` }}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* ── Step 1: Config ───────────────────────────────────────────── */}
       <Card>
         <CardContent className="p-4">
@@ -548,9 +669,13 @@ export default function ManualEnrichmentPage() {
                             : "—"}
                         </td>
                         <td className="px-3 py-1">
-                          {p.enrichedAt
-                            ? <span className="text-amber-600">re-enrich</span>
-                            : <span className="text-blue-600">new</span>}
+                          {p.enrichment && p.enrichmentSource === "auto"
+                            ? <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-green-100 text-green-700 font-medium">AUTO</span>
+                            : p.enrichment && p.enrichmentSource === "manual"
+                              ? <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-purple-100 text-purple-700 font-medium">MANUAL</span>
+                              : p.enrichedAt
+                                ? <span className="text-amber-600">re-enrich</span>
+                                : <span className="text-blue-600">new</span>}
                         </td>
                       </tr>
                     ))}
@@ -645,6 +770,36 @@ export default function ManualEnrichmentPage() {
                 Paste raw JSON — markdown fences OK
               </span>
             </div>
+
+            {/* Pre-fill from auto-enrichment if available */}
+            {products.some(p => p.enrichment && p.enrichmentSource === "auto") && (
+              <div className="flex items-center gap-2 p-2 rounded bg-green-50 border border-green-200">
+                <span className="text-xs text-green-700 flex-1">
+                  {products.filter(p => p.enrichment && p.enrichmentSource === "auto").length} product(s) already have auto-enrichment data.
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 h-7 text-xs border-green-300 text-green-700 hover:bg-green-100"
+                  onClick={() => {
+                    // Build a synthetic results array from existing enrichment data
+                    const items = products.map(p => {
+                      if (p.enrichment) {
+                        try { return JSON.parse(p.enrichment); } catch { /* fall through */ }
+                      }
+                      return null;
+                    });
+                    const synthetic = JSON.stringify({ results: items }, null, 2);
+                    setPasteText(synthetic);
+                    setParseResult(null);
+                    setStep("paste");
+                  }}
+                >
+                  <Cpu className="h-3 w-3" /> Load auto-enrichment as starting point
+                </Button>
+              </div>
+            )}
+
             <textarea
               ref={pasteRef}
               value={pasteText}

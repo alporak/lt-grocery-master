@@ -16,9 +16,7 @@ import {
   Check,
   AlertCircle,
   Loader2,
-  Languages,
   Brain,
-  RotateCcw,
   Cpu,
   Wifi,
   WifiOff,
@@ -59,6 +57,14 @@ interface StoreInfo {
   id: number;
   name: string;
   slug: string;
+}
+
+interface ProviderInfo {
+  name: string;
+  configured: boolean;
+  default_model: string;
+  models: string[];
+  rpm: number | null;
 }
 
 const PIPELINE_STEPS = ["clearing", "scraping", "translating", "enriching", "done"] as const;
@@ -228,6 +234,11 @@ export default function AdvancedSettingsPage() {
   const [storeSelectOpen, setStoreSelectOpen] = useState(false);
   const [stores, setStores] = useState<StoreInfo[]>([]);
   const [selectedStores, setSelectedStores] = useState<Set<string>>(new Set());
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  // set of provider names checked in the swarm; empty = all configured
+  const [swarmProviders, setSwarmProviders] = useState<Set<string>>(new Set());
+  const [providerModels, setProviderModels] = useState<Record<string, string>>({});
+  const [openModelPicker, setOpenModelPicker] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchPipelineStatus = useCallback(async () => {
@@ -249,7 +260,23 @@ export default function AdvancedSettingsPage() {
         if (s.ollamaUrl) setOllamaUrl(s.ollamaUrl);
         if (s.ollamaModel) setOllamaModel(s.ollamaModel);
         if (s.useOllamaForBulk === true) setUseOllamaForBulk(true);
+        if (s.swarmProviders) {
+          try {
+            const arr: string[] = JSON.parse(s.swarmProviders as string);
+            setSwarmProviders(new Set(arr));
+          } catch { /* ignore */ }
+        }
+        if (s.providerModels) {
+          try {
+            setProviderModels(JSON.parse(s.providerModels as string));
+          } catch { /* ignore */ }
+        }
       })
+      .catch(() => {});
+
+    fetch("/api/providers")
+      .then((r) => r.json())
+      .then((d) => { if (Array.isArray(d.providers)) setProviders(d.providers); })
       .catch(() => {});
 
     fetch("/api/stores")
@@ -292,6 +319,32 @@ export default function AdvancedSettingsPage() {
     setTimeout(() => setOllamaSaved(false), 2000);
   };
 
+  const saveSwarmConfig = async (nextProviders: Set<string>, nextModels: Record<string, string>) => {
+    setSwarmProviders(nextProviders);
+    setProviderModels(nextModels);
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        swarmProviders: JSON.stringify(Array.from(nextProviders)),
+        providerModels: JSON.stringify(nextModels),
+      }),
+    });
+  };
+
+  const toggleProvider = (name: string) => {
+    const next = new Set(swarmProviders);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    saveSwarmConfig(next, providerModels);
+  };
+
+  const setModelFor = (providerName: string, model: string) => {
+    const next = { ...providerModels, [providerName]: model };
+    saveSwarmConfig(swarmProviders, next);
+    setOpenModelPicker(null);
+  };
+
   const rebuildDatabase = async () => {
     setTriggering(true);
     try {
@@ -326,8 +379,6 @@ export default function AdvancedSettingsPage() {
         next.delete(phase);
         if (phase === "scrape") setStoreSelectOpen(false);
       } else {
-        if (phase === "retranslate") next.delete("translate");
-        if (phase === "translate") next.delete("retranslate");
         if (phase === "scrape") next.clear();
         else next.delete("scrape");
         next.add(phase);
@@ -370,7 +421,14 @@ export default function AdvancedSettingsPage() {
         const res = await fetch("/api/admin", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "run-phases", phases: [...selectedPhases] }),
+          body: JSON.stringify({
+            action: "run-phases",
+            phases: [...selectedPhases],
+            // pass explicit provider list + model overrides; empty = all configured
+            enrichProviders: swarmProviders.size > 0 ? Array.from(swarmProviders) : undefined,
+            enrichProvider: swarmProviders.size === 1 ? Array.from(swarmProviders)[0] : "swarm",
+            providerModels: Object.keys(providerModels).length > 0 ? providerModels : undefined,
+          }),
         });
         const data = await res.json();
         if (data.success) await fetchPipelineStatus();
@@ -696,86 +754,113 @@ export default function AdvancedSettingsPage() {
                   )}
                 </div>
 
-                {/* Translate untranslated */}
-                <button
-                  onClick={() => togglePhase("translate")}
-                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                    selectedPhases.has("translate") ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"
-                  }`}
-                >
-                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
-                    selectedPhases.has("translate") ? "bg-primary text-primary-foreground" : "bg-muted"
-                  }`}>
-                    <Languages className="h-4 w-4" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium">
-                      {language === "lt" ? "Versti naujus produktus" : "Translate new products"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {language === "lt" ? "Versti tik neišverstus produktus (LT → EN)" : "Translate only untranslated products (LT → EN)"}
-                    </p>
-                  </div>
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
-                    selectedPhases.has("translate") ? "border-primary bg-primary" : "border-muted-foreground/30"
-                  }`}>
-                    {selectedPhases.has("translate") && <Check className="h-3 w-3 text-primary-foreground" />}
-                  </div>
-                </button>
-
-                {/* Re-translate all */}
-                <button
-                  onClick={() => togglePhase("retranslate")}
-                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                    selectedPhases.has("retranslate") ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"
-                  }`}
-                >
-                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
-                    selectedPhases.has("retranslate") ? "bg-primary text-primary-foreground" : "bg-muted"
-                  }`}>
-                    <RotateCcw className="h-4 w-4" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium">
-                      {language === "lt" ? "Perversti visus produktus" : "Re-translate all products"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {language === "lt" ? "Išvalyti esamus vertimus ir versti viską iš naujo" : "Clear existing translations and re-translate everything"}
-                    </p>
-                  </div>
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
-                    selectedPhases.has("retranslate") ? "border-primary bg-primary" : "border-muted-foreground/30"
-                  }`}>
-                    {selectedPhases.has("retranslate") && <Check className="h-3 w-3 text-primary-foreground" />}
-                  </div>
-                </button>
-
                 {/* Enrich */}
-                <button
-                  onClick={() => togglePhase("enrich")}
-                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                    selectedPhases.has("enrich") ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"
-                  }`}
-                >
-                  <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
-                    selectedPhases.has("enrich") ? "bg-primary text-primary-foreground" : "bg-muted"
-                  }`}>
-                    <Brain className="h-4 w-4" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium">
-                      {language === "lt" ? "Praturtinti duomenis" : "Enrich data"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {language === "lt" ? "Embedding, kategorijos, LLM praturtinimas, grupavimas" : "Embedding, categories, LLM enrichment, grouping"}
-                    </p>
-                  </div>
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
-                    selectedPhases.has("enrich") ? "border-primary bg-primary" : "border-muted-foreground/30"
-                  }`}>
-                    {selectedPhases.has("enrich") && <Check className="h-3 w-3 text-primary-foreground" />}
-                  </div>
-                </button>
+                <div>
+                  <button
+                    onClick={() => togglePhase("enrich")}
+                    className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors w-full ${
+                      selectedPhases.has("enrich") ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"
+                    }`}
+                  >
+                    <div className={`flex items-center justify-center w-8 h-8 rounded-md ${
+                      selectedPhases.has("enrich") ? "bg-primary text-primary-foreground" : "bg-muted"
+                    }`}>
+                      <Brain className="h-4 w-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium">
+                        {language === "lt" ? "Praturtinti duomenis" : "Enrich data"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {language === "lt" ? "Embedding, LLM praturtinimas, grupavimas, eksportas" : "Embedding, LLM enrichment, grouping, export"}
+                      </p>
+                    </div>
+                    <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
+                      selectedPhases.has("enrich") ? "border-primary bg-primary" : "border-muted-foreground/30"
+                    }`}>
+                      {selectedPhases.has("enrich") && <Check className="h-3 w-3 text-primary-foreground" />}
+                    </div>
+                  </button>
+
+                  {/* Swarm provider checkmarks + model selectors */}
+                  {selectedPhases.has("enrich") && providers.length > 0 && (
+                    <div className="mt-1 ml-4 pl-3 border-l-2 border-primary/20 space-y-1">
+                      {providers.map((p) => {
+                        const checked = swarmProviders.size === 0 || swarmProviders.has(p.name);
+                        const currentModel = providerModels[p.name] || p.default_model;
+                        const isModelPickerOpen = openModelPicker === p.name;
+                        return (
+                          <div key={p.name} className="space-y-0.5">
+                            <div className="flex items-center gap-2 py-1 px-1 rounded hover:bg-accent/50 transition-colors">
+                              {/* Checkmark */}
+                              <button
+                                onClick={() => toggleProvider(p.name)}
+                                className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${
+                                  checked
+                                    ? p.configured ? "border-primary bg-primary" : "border-muted bg-muted"
+                                    : "border-muted-foreground/40"
+                                }`}
+                              >
+                                {checked && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
+                              </button>
+
+                              {/* Provider name + configured badge */}
+                              <button
+                                onClick={() => toggleProvider(p.name)}
+                                className="flex-1 text-left min-w-0"
+                              >
+                                <span className={`text-sm font-medium ${!p.configured ? "text-muted-foreground" : ""}`}>
+                                  {p.name}
+                                </span>
+                                {!p.configured && (
+                                  <span className="text-xs text-muted-foreground ml-1">
+                                    {language === "lt" ? "(nesukonfigūruota)" : "(not configured)"}
+                                  </span>
+                                )}
+                                {p.rpm && (
+                                  <span className="text-xs text-muted-foreground ml-1">{p.rpm} rpm</span>
+                                )}
+                              </button>
+
+                              {/* Model selector — only if provider has multiple models */}
+                              {p.models.length > 1 && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setOpenModelPicker(isModelPickerOpen ? null : p.name);
+                                  }}
+                                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors max-w-[140px] truncate"
+                                  title={currentModel}
+                                >
+                                  <span className="truncate">{currentModel.split("/").pop()}</span>
+                                  {isModelPickerOpen ? <ChevronUp className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Model dropdown */}
+                            {isModelPickerOpen && (
+                              <div className="ml-6 pl-2 border-l border-border space-y-0.5 pb-1">
+                                {p.models.map((m) => (
+                                  <button
+                                    key={m}
+                                    onClick={() => setModelFor(p.name, m)}
+                                    className="flex items-center gap-2 w-full text-left py-1 px-1 rounded hover:bg-accent transition-colors"
+                                  >
+                                    <div className={`w-3 h-3 rounded-full border-2 shrink-0 ${
+                                      currentModel === m ? "border-primary bg-primary" : "border-muted-foreground/40"
+                                    }`} />
+                                    <span className="text-xs font-mono break-all">{m}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
 
               <Button

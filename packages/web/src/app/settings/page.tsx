@@ -22,6 +22,7 @@ export default function SettingsPage() {
   const [address, setAddress] = useState("");
   const [scrapeInterval, setScrapeInterval] = useState("24");
   const [retention, setRetention] = useState("90");
+  const [scheduledScrapeEnabled, setScheduledScrapeEnabled] = useState(false);
   const [saved, setSaved] = useState(false);
   const [scrapingLocations, setScrapingLocations] = useState(false);
 
@@ -32,6 +33,7 @@ export default function SettingsPage() {
         if (s.address) setAddress(s.address);
         if (s.scrapeIntervalHours) setScrapeInterval(String(s.scrapeIntervalHours));
         if (s.priceRetentionDays) setRetention(String(s.priceRetentionDays));
+        setScheduledScrapeEnabled(String(s.scheduledScrapeEnabled) === "true");
       })
       .catch(() => {});
   }, []);
@@ -44,6 +46,7 @@ export default function SettingsPage() {
         address,
         scrapeIntervalHours: parseInt(scrapeInterval, 10),
         priceRetentionDays: parseInt(retention, 10),
+        scheduledScrapeEnabled,
       }),
     });
     setSaved(true);
@@ -143,6 +146,33 @@ export default function SettingsPage() {
             <MapPin className={`h-4 w-4 ${scrapingLocations ? "animate-pulse" : ""}`} />
             {scrapingLocations ? "Importing store locations..." : "Import store locations from web"}
           </Button>
+        </CardContent>
+      </Card>
+
+      {/* Scheduled scraping toggle */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">
+            {language === "lt" ? "Automatinis kainavimas" : "Scheduled Scraping"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              {language === "lt"
+                ? "Automatiškai atnaujinti kainas pagal intervalą"
+                : "Automatically update prices on the configured interval"}
+            </p>
+            <Button
+              variant={scheduledScrapeEnabled ? "default" : "outline"}
+              onClick={() => setScheduledScrapeEnabled(!scheduledScrapeEnabled)}
+              className="ml-4 shrink-0"
+            >
+              {scheduledScrapeEnabled
+                ? (language === "lt" ? "Įjungta" : "Enabled")
+                : (language === "lt" ? "Išjungta" : "Disabled")}
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
