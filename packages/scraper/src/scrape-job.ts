@@ -3,6 +3,7 @@ import { ScrapedProduct } from "./scrapers/base-scraper.js";
 import { IkiScraper, PromoCashCarryScraper } from "./scrapers/lastmile.js";
 import { BarboraScraper } from "./scrapers/barbora.js";
 import { RimiScraper } from "./scrapers/rimi.js";
+import { LidlScraper } from "./scrapers/lidl.js";
 import { translateBatch } from "./translate.js";
 
 // Lithuanian diacritics map for search index generation
@@ -26,6 +27,7 @@ const SCRAPER_MAP: Record<string, () => Scraper> = {
   "promo-cash-and-carry": () => new PromoCashCarryScraper(),
   barbora: () => new BarboraScraper(),
   rimi: () => new RimiScraper(),
+  lidl: () => new LidlScraper(),
 };
 
 // --- Pipeline state tracking (stored in Settings table as JSON) ---
@@ -60,7 +62,6 @@ async function clearStopRequest(): Promise<void> {
 }
 
 export async function runScrapeJob(storeSlugs?: string[]) {
-  // Clear any stale stop request before starting
   await clearStopRequest();
 
   const stores = await prisma.store.findMany({
@@ -70,104 +71,114 @@ export async function runScrapeJob(storeSlugs?: string[]) {
     },
   });
 
-  let storesCompleted = 0;
-  let totalProducts = 0;
-
   await updatePipelineState({
     status: "scraping",
     storesTotal: stores.length,
     storesCompleted: 0,
     productsScraped: 0,
-    currentStore: null,
+    currentStore: stores.map((s) => s.name).join(", "),
     error: null,
     finishedAt: null,
+    categoriesTotal: 0,
+    categoriesCompleted: 0,
+    currentCategory: null,
   });
 
-  for (const store of stores) {
-    // Fast check between stores
-    if (await isStopRequested()) {
-      console.log("[ScrapeJob] Stop requested, halting scrape.");
-      await clearStopRequest();
-      await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString(), storesCompleted });
-      return;
-    }
+  // Track all active scrapers so stop-watcher can close every browser at once
+  const activeScrapers = new Map<string, { close?(): Promise<void> }>();
 
+  // Aggregate per-store category progress for the progress bar
+  const catProgress = new Map<string, { total: number; done: number }>();
+
+  const stopWatcher = setInterval(async () => {
+    if (await isStopRequested()) {
+      for (const scraper of activeScrapers.values()) {
+        try { await scraper.close?.(); } catch { /* ignore */ }
+      }
+    }
+  }, 1000);
+  const clearWatcher = () => clearInterval(stopWatcher);
+
+  // Run all scrapers concurrently — errors are caught per-scraper so Promise.all never rejects
+  const scraperTasks = stores.map(async (store) => {
     const createScraper = SCRAPER_MAP[store.slug];
     if (!createScraper) {
       console.log(`[ScrapeJob] No scraper for store: ${store.slug}`);
-      storesCompleted++;
-      await updatePipelineState({ storesCompleted });
-      continue;
+      return { store, products: [] as ScrapedProduct[] };
     }
 
-    console.log(`[ScrapeJob] Scraping ${store.name}...`);
-    await updatePipelineState({ currentStore: store.name, categoriesTotal: 0, categoriesCompleted: 0, currentCategory: null });
     const scraper = createScraper();
+    activeScrapers.set(store.slug, scraper as { close?(): Promise<void> });
 
-    // Hook progress callback if scraper supports it
+    const log = await prisma.scrapeLog.create({ data: { storeId: store.id, status: "running" } });
+
+    // Hook progress callback — update aggregated totals
     if ("setProgressCallback" in scraper && typeof (scraper as { setProgressCallback: unknown }).setProgressCallback === "function") {
       (scraper as { setProgressCallback: (cb: unknown) => void }).setProgressCallback(
         async (info: { categoriesTotal: number; categoriesCompleted: number; currentCategory?: string }) => {
-          await updatePipelineState({
-            categoriesTotal: info.categoriesTotal,
-            categoriesCompleted: info.categoriesCompleted,
-            currentCategory: info.currentCategory ?? null,
-          });
+          catProgress.set(store.slug, { total: info.categoriesTotal, done: info.categoriesCompleted });
+          const totalCats = [...catProgress.values()].reduce((s, p) => s + p.total, 0);
+          const doneCats  = [...catProgress.values()].reduce((s, p) => s + p.done,  0);
+          await updatePipelineState({ categoriesTotal: totalCats, categoriesCompleted: doneCats });
         }
       );
     }
 
-    const log = await prisma.scrapeLog.create({
-      data: { storeId: store.id, status: "running" },
-    });
-
-    // Poll for stop every second — if requested, kill the Playwright browser immediately
-    let stopWatcher: ReturnType<typeof setInterval> | null = setInterval(async () => {
-      if (await isStopRequested()) {
-        try { await scraper.close(); } catch { /* ignore */ }
-      }
-    }, 1000);
-    const clearWatcher = () => {
-      if (stopWatcher) { clearInterval(stopWatcher); stopWatcher = null; }
-    };
-
     try {
+      console.log(`[ScrapeJob] Scraping ${store.name}...`);
       const products = await scraper.run();
-      clearWatcher();
+      activeScrapers.delete(store.slug);
 
-      // If stop came in while run() was finishing, treat as interrupted
       if (await isStopRequested()) {
         await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "interrupted", finishedAt: new Date() } });
-        await clearStopRequest();
-        await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString(), storesCompleted });
-        return;
+        return { store, products: [] as ScrapedProduct[], interrupted: true };
       }
 
-      await saveProducts(store.id, products);
-      await prisma.store.update({ where: { id: store.id }, data: { lastScrapedAt: new Date() } });
-      await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "success", productCount: products.length, finishedAt: new Date() } });
-      totalProducts += products.length;
-      storesCompleted++;
-      await updatePipelineState({ storesCompleted, productsScraped: totalProducts });
-      console.log(`[ScrapeJob] ${store.name}: saved ${products.length} products`);
+      await prisma.scrapeLog.update({
+        where: { id: log.id },
+        data: { status: "success", productCount: products.length, finishedAt: new Date() },
+      });
+      return { store, products };
     } catch (err) {
-      clearWatcher();
+      activeScrapers.delete(store.slug);
 
-      // Playwright throws when browser is closed mid-scrape — treat as interrupted if stop was requested
       if (await isStopRequested()) {
-        console.log(`[ScrapeJob] ${store.name} interrupted by stop request.`);
         await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "interrupted", finishedAt: new Date() } });
-        await clearStopRequest();
-        await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString(), storesCompleted });
-        return;
+        return { store, products: [] as ScrapedProduct[], interrupted: true };
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      await prisma.scrapeLog.update({ where: { id: log.id }, data: { status: "error", errorMessage: message.substring(0, 500), finishedAt: new Date() } });
-      storesCompleted++;
-      await updatePipelineState({ storesCompleted });
+      await prisma.scrapeLog.update({
+        where: { id: log.id },
+        data: { status: "error", errorMessage: message.substring(0, 500), finishedAt: new Date() },
+      });
       console.error(`[ScrapeJob] ${store.name} failed:`, err);
+      return { store, products: [] as ScrapedProduct[] };
     }
+  });
+
+  const results = await Promise.all(scraperTasks);
+  clearWatcher();
+
+  // Handle stop after all scrapers finish
+  if (await isStopRequested()) {
+    await clearStopRequest();
+    await updatePipelineState({ status: "idle", currentStore: null, finishedAt: new Date().toISOString() });
+    return;
+  }
+
+  // Save products sequentially — avoids concurrent SQLite write contention
+  let totalProducts = 0;
+  let storesCompleted = 0;
+  for (const { store, products } of results) {
+    if (products.length > 0) {
+      await saveProducts(store.id, products);
+      await prisma.store.update({ where: { id: store.id }, data: { lastScrapedAt: new Date() } });
+      totalProducts += products.length;
+      console.log(`[ScrapeJob] ${store.name}: saved ${products.length} products`);
+    }
+    storesCompleted++;
+    await updatePipelineState({ storesCompleted, productsScraped: totalProducts });
   }
 
   // Translate untranslated products

@@ -60,7 +60,7 @@ GEMINI_API_KEYS: list[str] = [
     if k
 ]
 GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""  # keep for compat
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 GEMINI_BATCH_SIZE = int(os.getenv("GEMINI_BATCH_SIZE", "250"))
 GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))   # 0 = disabled (fastest)
 GEMINI_WAIT_SECONDS = int(os.getenv("GEMINI_WAIT_SECONDS", "180"))       # 3 min between runs
@@ -766,13 +766,6 @@ _bulk_enrich_state = {
 # Available models per provider (first = default)
 # Swarm uses Gemini workers only
 MULTI_PROVIDERS: list[dict] = []
-
-GEMINI_MODELS = [
-    "gemini-2.5-flash-preview-04-17",
-    "gemini-2.5-pro-preview-03-25",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-]
 
 # Valid canonical category IDs — LLM must pick one of these
 _CATEGORY_IDS = [

@@ -29,6 +29,12 @@ async function main() {
       chain: "RIMI",
       url: "https://www.rimi.lt/e-parduotuve",
     },
+    {
+      slug: "lidl",
+      name: "Lidl",
+      chain: "LIDL",
+      url: "https://www.lidl.lt/",
+    },
   ];
 
   for (const store of stores) {

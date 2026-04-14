@@ -37,21 +37,11 @@ services:
     environment:
       - DATA_DIR=/app/data
       - MODEL_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-      - GROQ_API_KEY=${GROQ_API_KEY:-}
-      - GROQ2_API_KEY=${GROQ2_API_KEY:-}
-      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
-      - GROQ_BATCH_SIZE=${GROQ_BATCH_SIZE:-10}
       - OLLAMA_URL=${OLLAMA_URL:-}
-      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
-      - SAMBANOVA_API_KEY=${SAMBANOVA_API_KEY}
-      - HYPERBOLIC_API_KEY=${HYPERBOLIC_API_KEY}
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - SCALEWAY_API_KEY=${SCALEWAY_API_KEY}
-      - NOVITA_API_KEY=${NOVITA_API_KEY}
-      - FIREWORKS_API_KEY=${FIREWORKS_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL}
+      - GEMINI_BATCH_SIZE=${GEMINI_BATCH_SIZE}
+      - GEMINI_THINKING_BUDGET=${GEMINI_THINKING_BUDGET}
     volumes:
       - grocery-data:/app/data
     deploy:
