@@ -57,6 +57,7 @@ model Product {
   enrichment   String?
   enrichedAt   DateTime?
   enrichmentVersion Int?
+  enrichmentSource  String?
   reviewedAt   DateTime?
   productGroupId Int?
   createdAt    DateTime @default(now())

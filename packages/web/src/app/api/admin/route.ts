@@ -486,7 +486,115 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  if (action === "dedup") {
+    const result = await doDeduplicateProducts();
+    return NextResponse.json({ success: true, ...result });
+  }
+
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+}
+
+async function doDeduplicateProducts(): Promise<{
+  removed: number;
+  passes: { urlNorm: number; externalIdSuffix: number; nameImage: number };
+}> {
+  const passes = { urlNorm: 0, externalIdSuffix: 0, nameImage: 0 };
+
+  function pickSurvivor<T extends { id: number; enrichment: string | null }>(
+    group: T[]
+  ): { survivorId: number; dupeIds: number[] } {
+    const sorted = [...group].sort((a, b) => a.id - b.id);
+    const enriched = sorted.find((p) => p.enrichment !== null);
+    const survivor = enriched ?? sorted[0];
+    return {
+      survivorId: survivor.id,
+      dupeIds: sorted.filter((p) => p.id !== survivor.id).map((p) => p.id),
+    };
+  }
+
+  async function mergeDupes(survivorId: number, dupeIds: number[]) {
+    if (dupeIds.length === 0) return;
+    await prisma.priceRecord.updateMany({
+      where: { productId: { in: dupeIds } },
+      data: { productId: survivorId },
+    });
+    await prisma.product.deleteMany({ where: { id: { in: dupeIds } } });
+  }
+
+  // Pass 1: URL-normalised
+  {
+    const rows = await prisma.product.findMany({
+      where: { productUrl: { not: null } },
+      select: { id: true, storeId: true, productUrl: true, enrichment: true },
+    });
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const norm = p.productUrl!.split("?")[0].split("#")[0].toLowerCase().replace(/\/$/, "");
+      const key = `${p.storeId}::${norm}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      passes.urlNorm += dupeIds.length;
+    }
+  }
+
+  // Pass 2: externalId numeric-suffix ("LT-12345" vs "12345")
+  {
+    const rows = await prisma.product.findMany({
+      select: { id: true, storeId: true, externalId: true, enrichment: true },
+    });
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const m = p.externalId.match(/(\d{4,})$/);
+      if (!m) continue;
+      const key = `${p.storeId}::${m[1]}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      if (new Set(group.map((p) => p.externalId)).size < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      passes.externalIdSuffix += dupeIds.length;
+    }
+  }
+
+  // Pass 3: normalised name + imageUrl (conservative)
+  {
+    const rows = await prisma.product.findMany({
+      where: { imageUrl: { not: null } },
+      select: { id: true, storeId: true, nameLt: true, imageUrl: true, enrichment: true },
+    });
+    const normName = (s: string) =>
+      s.toLowerCase()
+        .replace(/\d+\s*(kg|g|ml|l|vnt|pak)/gi, "")
+        .replace(/[,.\-–]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const nn = normName(p.nameLt);
+      if (!nn || nn.length < 4) continue;
+      const key = `${p.storeId}::${nn}::${p.imageUrl}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      passes.nameImage += dupeIds.length;
+    }
+  }
+
+  const removed = passes.urlNorm + passes.externalIdSuffix + passes.nameImage;
+  console.log(`[Dedup] Removed ${removed} (url:${passes.urlNorm} extId:${passes.externalIdSuffix} name:${passes.nameImage})`);
+  return { removed, passes };
 }
 
 function normalizeForIndex(text: string): string {

@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useI18n } from "@/components/i18n-provider";
-import { Plus, Copy, Trash2, ShoppingBasket } from "lucide-react";
+import { Plus, Copy, Trash2, ShoppingBasket, Loader2 } from "lucide-react";
 
 interface GroceryList {
   id: number;
@@ -26,8 +26,8 @@ interface GroceryList {
 
 export default function GroceryListsPage() {
   const { t } = useI18n();
+  const router = useRouter();
   const [lists, setLists] = useState<GroceryList[]>([]);
-  const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
 
   const fetchLists = () => {
@@ -42,16 +42,17 @@ export default function GroceryListsPage() {
   }, []);
 
   const createList = async () => {
-    const name = newName.trim() || `${t("groceryLists.title")} ${lists.length + 1}`;
     setCreating(true);
-    await fetch("/api/grocery-lists", {
+    const defaultName = `${t("groceryLists.title")} ${lists.length + 1}`;
+    const created = await fetch("/api/grocery-lists", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    setNewName("");
+      body: JSON.stringify({ name: defaultName }),
+    }).then((r) => r.json());
     setCreating(false);
-    fetchLists();
+    if (created?.id) {
+      router.push(`/grocery-lists/${created.id}?rename=1`);
+    }
   };
 
   const duplicateList = async (list: GroceryList) => {
@@ -78,25 +79,17 @@ export default function GroceryListsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-bold">{t("groceryLists.title")}</h1>
-
-      {/* Create new list */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex gap-2">
-            <Input
-              placeholder={t("groceryLists.listName")}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && createList()}
-            />
-            <Button onClick={createList} disabled={creating} className="gap-2 shrink-0">
-              <Plus className="h-4 w-4" />
-              {t("groceryLists.newList")}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-bold">{t("groceryLists.title")}</h1>
+        <Button onClick={createList} disabled={creating} className="gap-2">
+          {creating ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Plus className="h-4 w-4" />
+          )}
+          {t("groceryLists.newList")}
+        </Button>
+      </div>
 
       {/* Lists */}
       {lists.length === 0 ? (

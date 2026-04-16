@@ -32,6 +32,10 @@ export class LidlScraper extends BaseScraper {
       await page.goto(LidlScraper.BASE, { waitUntil: "domcontentloaded", timeout: 60000 });
       await this.dismissCookies(page);
 
+      // Auto-remove any consent overlays that appear on subsequent pages
+      await page.route('**/*onetrust*', (route) => route.abort());
+      await page.route('**/*cookielaw*', (route) => route.abort());
+
       // Discover subcategories for each top-level category
       const categories: Array<{ url: string; name: string }> = [];
 
@@ -106,15 +110,27 @@ export class LidlScraper extends BaseScraper {
   private async dismissCookies(page: Page): Promise<void> {
     try {
       const btn = page.locator(
-        'button:has-text("Sutikti"), button:has-text("Priimti"), button:has-text("Accept all"), button:has-text("Leisti visus")'
+        'button:has-text("SUTINKU"), button:has-text("Sutinku"), button:has-text("Sutikti"), button:has-text("Priimti"), button:has-text("Accept all"), button:has-text("Leisti visus")'
       );
       if (await btn.first().isVisible({ timeout: 4000 })) {
         await btn.first().click();
-        await this.delay(500);
+        await this.delay(1000);
+        return;
       }
-    } catch {
-      // No cookie banner
-    }
+    } catch {}
+    try {
+      // OneTrust consent (used on some Lidl pages like Akcijos)
+      const otBtn = page.locator('#onetrust-accept-btn-handler');
+      if (await otBtn.isVisible({ timeout: 3000 })) {
+        await otBtn.click();
+        await this.delay(500);
+        return;
+      }
+    } catch {}
+    // Fallback: forcibly remove any blocking consent overlay
+    await page.evaluate(() => {
+      document.getElementById('onetrust-consent-sdk')?.remove();
+    }).catch(() => {});
   }
 
   private async scrapeCategory(
@@ -124,18 +140,26 @@ export class LidlScraper extends BaseScraper {
   ): Promise<ScrapedProduct[]> {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page
-      .waitForSelector('article, [class*="product"], [class*="Product"]', { timeout: 15000 })
+      .waitForSelector('a[href*="/p/"]', { timeout: 15000 })
       .catch(() => {});
-    await this.delay(1000);
+    // Remove any consent overlays that may block interaction
+    await page.evaluate(() => {
+      document.getElementById('onetrust-consent-sdk')?.remove();
+      document.querySelector('.onetrust-pc-dark-filter')?.remove();
+    }).catch(() => {});
+    await this.delay(1500);
 
     // Load-more loop with stale guard (same pattern as IKI)
     let prevCount = 0;
     let stale = 0;
     while (stale < 2) {
       const count = await page
-        .$$eval(
-          'article[class*="product"], article[class*="Product"], [data-product-id], [class*="ProductItem"], [class*="product-item"]',
-          (els) => els.length
+        .$$eval('a[href*="/p/"]', (links) =>
+          new Set(
+            links
+              .map((a) => (a as HTMLAnchorElement).href.match(/\/p(\d+)/)?.[1])
+              .filter(Boolean)
+          ).size
         )
         .catch(() => 0);
 
@@ -147,7 +171,7 @@ export class LidlScraper extends BaseScraper {
       }
 
       const moreBtn = await page.$(
-        'button:has-text("Daugiau produktų"), button:has-text("Daugiau"), button:has-text("Rodyti daugiau")'
+        'button:has-text("Daugiau produktų"), button:has-text("Daugiau"), button:has-text("Rodyti daugiau"), a:has-text("Daugiau produktų")'
       );
       if (!moreBtn || !(await moreBtn.isVisible().catch(() => false))) break;
 
@@ -155,51 +179,48 @@ export class LidlScraper extends BaseScraper {
       await this.delay(2000);
     }
 
-    // Extract products from all loaded cards
-    const rawProducts = await page.$$eval(
-      'article[class*="product"], article[class*="Product"], [data-product-id], [class*="ProductItem"], [class*="product-item"]',
-      (elements) => {
-        const results: Array<{
-          externalId: string;
-          name: string;
-          url: string;
-          priceText: string;
-          imageUrl: string | null;
-        }> = [];
-        const seen = new Set<string>();
+    // Extract products using /p/ links as anchors (resilient to class-name changes)
+    const rawProducts = await page.evaluate(() => {
+      const results: Array<{
+        externalId: string;
+        name: string;
+        url: string;
+        priceText: string;
+        imageUrl: string | null;
+      }> = [];
+      const seen = new Set<string>();
 
-        for (const el of elements) {
-          // Product link — Lidl uses /p/ paths
-          const link =
-            (el.querySelector('a[href*="/p/"]') as HTMLAnchorElement | null) ||
-            (el.closest('a[href*="/p/"]') as HTMLAnchorElement | null);
-          const href = link?.href || "";
+      for (const link of document.querySelectorAll<HTMLAnchorElement>('a[href*="/p/"]')) {
+        const href = link.href;
+        const idMatch = href.match(/\/p(\d+)(?:[?#/]|$)/);
+        const externalId = idMatch?.[1] || "";
+        if (!externalId || seen.has(externalId)) continue;
+        seen.add(externalId);
 
-          // Extract numeric ID: e.g. /p/some-product/p123456 → "123456"
-          const idMatch = href.match(/\/p(\d+)(?:[/?]|$)/) || href.match(/[?&]productId=(\d+)/);
-          // Fallback: use last URL segment
-          const externalId = idMatch ? idMatch[1] : href.split("/").filter(Boolean).pop() || "";
-
-          if (!externalId || seen.has(externalId)) continue;
-          seen.add(externalId);
-
-          const img = el.querySelector("img");
-          const nameEl = el.querySelector(
-            '[class*="title"], [class*="name"], [class*="Title"], [class*="Name"], h2, h3'
-          );
-          const name = (nameEl?.textContent || img?.alt || "").trim();
-
-          results.push({
-            externalId,
-            name,
-            url: href,
-            priceText: el.textContent?.trim() || "",
-            imageUrl: img?.src || null,
-          });
+        // Walk up to the product card (stop when parent has many children = grid)
+        let card: Element = link;
+        while (card.parentElement && card.parentElement !== document.body) {
+          if (card.parentElement.children.length > 3) break;
+          card = card.parentElement;
         }
-        return results;
+
+        const img = card.querySelector("img");
+        const name = (link.textContent || img?.alt || "")
+          .trim()
+          .split("\n")[0]
+          ?.trim() || "";
+        if (!name) continue;
+
+        results.push({
+          externalId,
+          name,
+          url: href.split("#")[0],
+          priceText: card.textContent || "",
+          imageUrl: img?.src || img?.getAttribute("data-src") || null,
+        });
       }
-    );
+      return results;
+    });
 
     const products: ScrapedProduct[] = [];
     for (const p of rawProducts) {
@@ -224,43 +245,59 @@ export class LidlScraper extends BaseScraper {
   private parseLidlPrice(text: string): {
     regularPrice: number;
     salePrice?: number;
+    loyaltyPrice?: number;
     unitPrice?: number;
     unitLabel?: string;
     campaignText?: string;
   } {
     let regularPrice = 0;
     let salePrice: number | undefined;
+    let loyaltyPrice: number | undefined;
     let unitPrice: number | undefined;
     let unitLabel: string | undefined;
     let campaignText: string | undefined;
 
-    // Unit price (e.g. "2,99 €/kg")
-    const unitMatch = text.match(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/i);
-    if (unitMatch) {
-      unitPrice = parseFloat(unitMatch[1].replace(",", "."));
-      unitLabel = `€/${unitMatch[2]}`;
+    // Unit price — two formats:
+    //   "14,32 €/kg"  (slash notation)
+    //   "1 kg = 14,32 €"  (equation notation — common on Lidl LT)
+    const unitSlash = text.match(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|g|ml|vnt)/i);
+    const unitEq    = text.match(/\d+(?:[.,]\d+)?\s*(kg|l|g|ml|vnt)\s*=\s*(\d+[.,]\d+)\s*€/i);
+    if (unitSlash) {
+      unitPrice = parseFloat(unitSlash[1].replace(",", "."));
+      unitLabel = `€/${unitSlash[2].toLowerCase()}`;
+    } else if (unitEq) {
+      unitPrice = parseFloat(unitEq[2].replace(",", "."));
+      unitLabel  = `€/${unitEq[1].toLowerCase()}`;
     }
 
-    // Strip unit prices before extracting package prices
-    const cleaned = text.replace(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|vnt|ml)/gi, "");
-    const priceMatches = [...cleaned.matchAll(/(\d+[.,]\d+)\s*€/g)];
+    // Strip ALL unit-price expressions so they don't pollute package-price extraction
+    const cleaned = text
+      .replace(/\d+(?:[.,]\d+)?\s*(?:kg|l|g|ml|vnt)\s*=\s*\d+[.,]\d+\s*€/gi, "")
+      .replace(/\d+[.,]\d+\s*€\s*\/\s*(?:kg|l|g|ml|vnt)/gi, "");
 
+    // Package prices remaining (in order of appearance)
+    const priceMatches = [...cleaned.matchAll(/(\d+[.,]\d+)\s*€/g)];
     if (priceMatches.length >= 1) {
       regularPrice = parseFloat(priceMatches[0][1].replace(",", "."));
     }
 
-    // If discount % present and two prices: first=sale price, last=original
-    const discountMatch = text.match(/[–\-](\d+)\s*%/);
-    if (discountMatch && priceMatches.length >= 2) {
-      salePrice = regularPrice;
-      regularPrice = parseFloat(
-        priceMatches[priceMatches.length - 1][1].replace(",", ".")
-      );
+    // Campaign text
+    const campMatch = text.match(/([–\-]\d+\s*%|\d+\s*\+\s*\d+)/);
+    if (campMatch) campaignText = campMatch[0].replace("–", "-");
+
+    // Second price: loyalty (su Lidl Plus) or regular sale
+    if (priceMatches.length >= 2) {
+      const secondPrice = parseFloat(priceMatches[1][1].replace(",", "."));
+      const isLidlPlus  = /su\s+lidl\s+plus/i.test(text);
+      if (isLidlPlus) {
+        // Lidl Plus card price — show separately (not a public sale)
+        loyaltyPrice = secondPrice;
+      } else if (campMatch) {
+        // Regular promotional sale
+        salePrice = secondPrice;
+      }
     }
 
-    const campMatch = text.match(/([–\-]\d+\s*%|\d+\s*\+\s*\d+)/);
-    if (campMatch) campaignText = campMatch[0];
-
-    return { regularPrice, salePrice, unitPrice, unitLabel, campaignText };
+    return { regularPrice, salePrice, loyaltyPrice, unitPrice, unitLabel, campaignText };
   }
 }

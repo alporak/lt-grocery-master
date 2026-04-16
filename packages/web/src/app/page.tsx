@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useI18n } from "@/components/i18n-provider";
 import {
   Package,
@@ -14,10 +16,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
-  Brain,
-  Tags,
-  Sparkles,
-  Cpu,
+  Tag,
 } from "lucide-react";
 
 interface DashboardStats {
@@ -30,11 +29,15 @@ interface DashboardStats {
 interface DealProduct {
   id: number;
   name: string;
-  store: { name: string; chain: string };
+  imageUrl: string | null;
+  productUrl: string | null;
+  store: { id: number; name: string; chain: string } | null;
   latestPrice: {
     regularPrice: number;
     salePrice: number | null;
     campaignText: string | null;
+    unitPrice: number | null;
+    unitLabel: string | null;
   } | null;
 }
 
@@ -56,14 +59,14 @@ interface StoreStatus {
   recentLogs: ScrapeLogEntry[];
 }
 
-interface EnrichmentStats {
-  totalProducts: number;
-  embeddingsCount: number;
-  categorizedCount: number;
-  enrichedCount: number;
-  embedderStatus: string;
-  topCategories: { category: string; count: number }[];
-}
+const CHAIN_COLORS: Record<string, string> = {
+  IKI: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
+  MAXIMA: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300",
+  BARBORA: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300",
+  RIMI: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
+  LIDL: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300",
+  PROMO: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
+};
 
 function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
@@ -76,42 +79,137 @@ function timeAgo(date: Date): string {
   return `${days}d ${hours % 24}h`;
 }
 
+function savingsPercent(regular: number, sale: number): number {
+  return Math.round(((regular - sale) / regular) * 100);
+}
+
+function DealCard({ product }: { product: DealProduct }) {
+  const price = product.latestPrice;
+  const chain = product.store?.chain ?? "";
+  const chainColor = CHAIN_COLORS[chain] ?? "bg-gray-100 text-gray-700";
+  const savings =
+    price?.salePrice != null
+      ? savingsPercent(price.regularPrice, price.salePrice)
+      : null;
+
+  return (
+    <Link href={`/products/${product.id}`}>
+      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full flex flex-col">
+        {product.imageUrl && (
+          <div className="relative w-full h-32 bg-muted rounded-t-lg overflow-hidden">
+            <Image
+              src={product.imageUrl}
+              alt={product.name ?? ""}
+              fill
+              className="object-contain p-2"
+              sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
+            />
+          </div>
+        )}
+        <CardContent className="p-3 flex flex-col flex-1">
+          <div className="flex items-start justify-between gap-1 mb-1">
+            <Badge className={`text-xs shrink-0 ${chainColor}`} variant="secondary">
+              {product.store?.name ?? chain}
+            </Badge>
+            {price?.campaignText && (
+              <Badge variant="destructive" className="text-xs shrink-0">
+                {price.campaignText}
+              </Badge>
+            )}
+          </div>
+          <p className="text-xs font-medium leading-snug mb-2 flex-1 line-clamp-2">
+            {product.name}
+          </p>
+          <div className="flex items-baseline gap-2 mt-auto">
+            {price?.salePrice != null ? (
+              <>
+                <span className="text-base font-bold text-primary">
+                  {price.salePrice.toFixed(2)}€
+                </span>
+                <span className="text-xs text-muted-foreground line-through">
+                  {price.regularPrice.toFixed(2)}€
+                </span>
+                {savings != null && savings > 0 && (
+                  <span className="text-xs font-medium text-green-600 dark:text-green-400">
+                    -{savings}%
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="text-base font-bold">
+                {price?.regularPrice.toFixed(2)}€
+              </span>
+            )}
+          </div>
+          {price?.unitPrice != null && price.unitLabel && (
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {price.unitPrice.toFixed(2)} {price.unitLabel}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}
+
+function DealGrid({ deals }: { deals: DealProduct[] }) {
+  if (deals.length === 0) {
+    return (
+      <Card>
+        <CardContent className="py-8 text-center text-muted-foreground text-sm">
+          No deals found
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+      {deals.map((p) => (
+        <DealCard key={p.id} product={p} />
+      ))}
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const { t, language } = useI18n();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [deals, setDeals] = useState<DealProduct[]>([]);
   const [storeStatuses, setStoreStatuses] = useState<StoreStatus[]>([]);
-  const [enrichment, setEnrichment] = useState<EnrichmentStats | null>(null);
 
   useEffect(() => {
-    // Fetch products with sales
-    fetch(`/api/products?pageSize=12&lang=${language}`)
+    // Fetch deal products
+    fetch(`/api/deals?limit=64&lang=${language}`)
       .then((r) => r.json())
-      .then((data) => {
-        const onSale = data.items.filter(
-          (p: DealProduct) => p.latestPrice?.salePrice || p.latestPrice?.campaignText
-        );
-        setDeals(onSale.slice(0, 8));
-        setStats({
-          totalProducts: data.total,
-          storesTracked: 4,
-          lastScraped: null,
-          activeListCount: 0,
-        });
+      .then((data: { items: DealProduct[]; total: number }) => {
+        setDeals(data.items);
       })
       .catch(() => {});
 
-    // Fetch grocery list count
+    // Total product count
+    fetch(`/api/products?pageSize=1&lang=${language}`)
+      .then((r) => r.json())
+      .then((data) => {
+        setStats((prev) => ({
+          totalProducts: data.total,
+          storesTracked: prev?.storesTracked ?? 0,
+          lastScraped: prev?.lastScraped ?? null,
+          activeListCount: prev?.activeListCount ?? 0,
+        }));
+      })
+      .catch(() => {});
+
+    // Grocery list count
     fetch("/api/grocery-lists")
       .then((r) => r.json())
-      .then((lists) => {
+      .then((lists: unknown[]) => {
         setStats((prev) =>
           prev ? { ...prev, activeListCount: lists.length } : prev
         );
       })
       .catch(() => {});
 
-    // Fetch store info for last scraped
+    // Last scraped
     fetch("/api/stores")
       .then((r) => r.json())
       .then((stores: Array<{ lastScrapedAt: string | null }>) => {
@@ -124,13 +222,17 @@ export default function DashboardPage() {
           )[0];
         setStats((prev) =>
           prev
-            ? { ...prev, lastScraped: latest?.lastScrapedAt || null }
+            ? {
+                ...prev,
+                storesTracked: stores.length,
+                lastScraped: latest?.lastScrapedAt ?? null,
+              }
             : prev
         );
       })
       .catch(() => {});
 
-    // Fetch scrape status
+    // Scrape status — poll every 15s
     const fetchStatus = () =>
       fetch("/api/scrape-status")
         .then((r) => r.json())
@@ -139,20 +241,10 @@ export default function DashboardPage() {
     fetchStatus();
     const statusInterval = setInterval(fetchStatus, 15000);
 
-    // Fetch enrichment stats
-    const fetchEnrichment = () =>
-      fetch("/api/enrichment-stats")
-        .then((r) => r.json())
-        .then((data: EnrichmentStats) => setEnrichment(data))
-        .catch(() => {});
-    fetchEnrichment();
-    const enrichInterval = setInterval(fetchEnrichment, 30000);
-
-    return () => {
-      clearInterval(statusInterval);
-      clearInterval(enrichInterval);
-    };
+    return () => clearInterval(statusInterval);
   }, [language]);
+
+  const chains = [...new Set(deals.map((d) => d.store?.chain).filter(Boolean))] as string[];
 
   return (
     <div className="space-y-6">
@@ -232,7 +324,10 @@ export default function DashboardPage() {
             const isSuccess = latest?.status === "success";
 
             return (
-              <Card key={store.id} className={isRunning ? "border-primary/50" : ""}>
+              <Card
+                key={store.id}
+                className={isRunning ? "border-primary/50" : ""}
+              >
                 <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">
                     {store.name}
@@ -264,14 +359,17 @@ export default function DashboardPage() {
                           {t("dashboard.statusRunning")}
                         </span>
                       ) : isError ? (
-                        <span className="text-destructive" title={latest.errorMessage || ""}>
+                        <span
+                          className="text-destructive"
+                          title={latest.errorMessage || ""}
+                        >
                           {t("dashboard.statusError")}:{" "}
                           {latest.errorMessage?.substring(0, 60)}
                         </span>
                       ) : (
                         <span>
-                          {t("dashboard.statusSuccess")} — {latest.productCount}{" "}
-                          {t("dashboard.productsFound")}
+                          {t("dashboard.statusSuccess")} —{" "}
+                          {latest.productCount} {t("dashboard.productsFound")}
                         </span>
                       )}
                     </div>
@@ -288,140 +386,18 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* AI Enrichment Status */}
-      {enrichment && (
-        <div>
-          <h2 className="text-xl font-semibold mb-4">
-            <Brain className="h-5 w-5 inline mr-2" />
-            {language === "lt" ? "AI apdorojimo būsena" : "AI Processing Status"}
-          </h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">
-                  {language === "lt" ? "Įterpimai" : "Embeddings"}
-                </CardTitle>
-                <Cpu className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{enrichment.embeddingsCount}</div>
-                <div className="mt-1">
-                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                    <span>{enrichment.totalProducts > 0 ? Math.round((enrichment.embeddingsCount / enrichment.totalProducts) * 100) : 0}%</span>
-                    <span>{enrichment.embeddingsCount}/{enrichment.totalProducts}</span>
-                  </div>
-                  <div className="h-2 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-500 rounded-full transition-all"
-                      style={{ width: `${enrichment.totalProducts > 0 ? (enrichment.embeddingsCount / enrichment.totalProducts) * 100 : 0}%` }}
-                    />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">
-                  {language === "lt" ? "Kategorijos" : "Categorized"}
-                </CardTitle>
-                <Tags className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{enrichment.categorizedCount}</div>
-                <div className="mt-1">
-                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                    <span>{enrichment.totalProducts > 0 ? Math.round((enrichment.categorizedCount / enrichment.totalProducts) * 100) : 0}%</span>
-                    <span>{enrichment.categorizedCount}/{enrichment.totalProducts}</span>
-                  </div>
-                  <div className="h-2 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-green-500 rounded-full transition-all"
-                      style={{ width: `${enrichment.totalProducts > 0 ? (enrichment.categorizedCount / enrichment.totalProducts) * 100 : 0}%` }}
-                    />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">
-                  {language === "lt" ? "LLM praturtinta" : "LLM Enriched"}
-                </CardTitle>
-                <Sparkles className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{enrichment.enrichedCount}</div>
-                <div className="mt-1">
-                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                    <span>{enrichment.totalProducts > 0 ? Math.round((enrichment.enrichedCount / enrichment.totalProducts) * 100) : 0}%</span>
-                    <span>{enrichment.enrichedCount}/{enrichment.totalProducts}</span>
-                  </div>
-                  <div className="h-2 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-purple-500 rounded-full transition-all"
-                      style={{ width: `${enrichment.totalProducts > 0 ? (enrichment.enrichedCount / enrichment.totalProducts) * 100 : 0}%` }}
-                    />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">
-                  {language === "lt" ? "Embedder būsena" : "Embedder Service"}
-                </CardTitle>
-                {enrichment.embedderStatus === "online" ? (
-                  <CheckCircle2 className="h-4 w-4 text-green-500" />
-                ) : (
-                  <XCircle className="h-4 w-4 text-destructive" />
-                )}
-              </CardHeader>
-              <CardContent>
-                <div className={`text-lg font-bold ${enrichment.embedderStatus === "online" ? "text-green-600" : "text-destructive"}`}>
-                  {enrichment.embedderStatus === "online"
-                    ? (language === "lt" ? "Veikia" : "Online")
-                    : (language === "lt" ? "Nepasiekiamas" : "Offline")}
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {language === "lt" ? "Semantinė paieška" : "Semantic search"}{" "}
-                  {enrichment.embeddingsCount > 0
-                    ? (language === "lt" ? "aktyvi" : "active")
-                    : (language === "lt" ? "neaktyvi" : "inactive")}
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Top categories */}
-          {enrichment.topCategories.length > 0 && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium">
-                  {language === "lt" ? "Populiariausios kategorijos" : "Top Categories"}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex flex-wrap gap-2">
-                  {enrichment.topCategories.map((cat) => (
-                    <Badge key={cat.category} variant="secondary" className="text-xs">
-                      {cat.category} ({cat.count})
-                    </Badge>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
+      {/* Current Deals */}
+      <div>
+        <div className="flex items-center gap-2 mb-4">
+          <Tag className="h-5 w-5" />
+          <h2 className="text-xl font-semibold">{t("dashboard.currentDeals")}</h2>
+          {deals.length > 0 && (
+            <Badge variant="secondary" className="ml-auto">
+              {deals.length} deals
+            </Badge>
           )}
         </div>
-      )}
 
-      {/* Current deals */}
-      <div>
-        <h2 className="text-xl font-semibold mb-4">
-          {t("dashboard.currentDeals")}
-        </h2>
         {deals.length === 0 ? (
           <Card>
             <CardContent className="py-8 text-center text-muted-foreground">
@@ -429,45 +405,31 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {deals.map((product) => (
-              <Link key={product.id} href={`/products/${product.id}`}>
-                <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
-                  <CardContent className="p-4">
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <Badge variant="outline" className="text-xs shrink-0">
-                        {product.store.name}
-                      </Badge>
-                      {product.latestPrice?.campaignText && (
-                        <Badge variant="destructive" className="text-xs">
-                          {product.latestPrice.campaignText}
-                        </Badge>
-                      )}
-                    </div>
-                    <h3 className="text-sm font-medium mb-2">
-                      {product.name}
-                    </h3>
-                    <div className="flex items-baseline gap-2">
-                      {product.latestPrice?.salePrice ? (
-                        <>
-                          <span className="text-lg font-bold text-primary">
-                            {product.latestPrice.salePrice.toFixed(2)}€
-                          </span>
-                          <span className="text-sm text-muted-foreground line-through">
-                            {product.latestPrice.regularPrice.toFixed(2)}€
-                          </span>
-                        </>
-                      ) : (
-                        <span className="text-lg font-bold">
-                          {product.latestPrice?.regularPrice.toFixed(2)}€
-                        </span>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
+          <Tabs defaultValue="all">
+            <TabsList className="mb-4 flex-wrap h-auto gap-1">
+              <TabsTrigger value="all">
+                All ({deals.length})
+              </TabsTrigger>
+              {chains.map((chain) => {
+                const count = deals.filter((d) => d.store?.chain === chain).length;
+                return (
+                  <TabsTrigger key={chain} value={chain}>
+                    {chain} ({count})
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+
+            <TabsContent value="all">
+              <DealGrid deals={deals} />
+            </TabsContent>
+
+            {chains.map((chain) => (
+              <TabsContent key={chain} value={chain}>
+                <DealGrid deals={deals.filter((d) => d.store?.chain === chain)} />
+              </TabsContent>
             ))}
-          </div>
+          </Tabs>
         )}
       </div>
     </div>

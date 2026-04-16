@@ -4,7 +4,6 @@ import { IkiScraper, PromoCashCarryScraper } from "./scrapers/lastmile.js";
 import { BarboraScraper } from "./scrapers/barbora.js";
 import { RimiScraper } from "./scrapers/rimi.js";
 import { LidlScraper } from "./scrapers/lidl.js";
-import { translateBatch } from "./translate.js";
 
 // Lithuanian diacritics map for search index generation
 function normalizeForIndex(text: string): string {
@@ -76,6 +75,7 @@ export async function runScrapeJob(storeSlugs?: string[]) {
     storesTotal: stores.length,
     storesCompleted: 0,
     productsScraped: 0,
+    newProducts: 0,
     currentStore: stores.map((s) => s.name).join(", "),
     error: null,
     finishedAt: null,
@@ -169,33 +169,65 @@ export async function runScrapeJob(storeSlugs?: string[]) {
 
   // Save products sequentially — avoids concurrent SQLite write contention
   let totalProducts = 0;
+  let totalNew = 0;
   let storesCompleted = 0;
   for (const { store, products } of results) {
     if (products.length > 0) {
-      await saveProducts(store.id, products);
+      const { saved, newCount } = await saveProducts(store.id, products);
       await prisma.store.update({ where: { id: store.id }, data: { lastScrapedAt: new Date() } });
-      totalProducts += products.length;
-      console.log(`[ScrapeJob] ${store.name}: saved ${products.length} products`);
+      totalProducts += saved;
+      totalNew += newCount;
+      console.log(
+        `[ScrapeJob] ${store.name}: saved ${saved} products` +
+        (newCount > 0 ? ` (${newCount} new, need enrichment)` : "")
+      );
     }
     storesCompleted++;
-    await updatePipelineState({ storesCompleted, productsScraped: totalProducts });
+    await updatePipelineState({ storesCompleted, productsScraped: totalProducts, newProducts: totalNew });
   }
 
-  // Translate untranslated products
-  await updatePipelineState({ status: "translating", currentStore: null });
-  await translateNewProducts();
+  if (totalNew > 0) {
+    console.log(`[ScrapeJob] ${totalNew} new products found across all stores — enrich manually`);
+  }
 
-  // Notify embedder service to process new/updated products
-  await updatePipelineState({ status: "enriching" });
-  await notifyEmbedder();
+  // Deduplicate products that share the same productUrl within a store
+  await updatePipelineState({ status: "deduplicating" });
+  await deduplicateProducts();
 
   // Clean up old price records
   await cleanupOldRecords();
 
-  await updatePipelineState({ status: "done", finishedAt: new Date().toISOString() });
+  await updatePipelineState({
+    status: "done",
+    currentStore: null,
+    finishedAt: new Date().toISOString(),
+    newProducts: totalNew,
+  });
 }
 
-async function saveProducts(storeId: number, products: ScrapedProduct[]) {
+/**
+ * Save scraped products to DB.
+ *
+ * For each product:
+ *   - EXISTING (already in DB by storeId+externalId): update details + add price record
+ *   - NEW: create product row + add initial price record, no enrichment triggered
+ *
+ * Returns: { saved, newCount } — saved = total upserted, newCount = newly created products
+ */
+async function saveProducts(
+  storeId: number,
+  products: ScrapedProduct[]
+): Promise<{ saved: number; newCount: number }> {
+  // Pre-fetch known externalIds for this store so we can distinguish new vs existing
+  const existingRows = await prisma.product.findMany({
+    where: { storeId },
+    select: { externalId: true },
+  });
+  const knownIds = new Set(existingRows.map((r) => r.externalId));
+
+  let saved = 0;
+  let newCount = 0;
+
   // Process in batches of 50 within transactions to reduce SQLite lock contention
   const BATCH = 50;
   for (let i = 0; i < products.length; i += BATCH) {
@@ -203,50 +235,57 @@ async function saveProducts(storeId: number, products: ScrapedProduct[]) {
     await prisma.$transaction(async (tx) => {
       for (const p of batch) {
         try {
+          const isNew = !knownIds.has(p.externalId);
+
           const searchParts = [p.nameLt, p.categoryLt, p.brand].filter(Boolean);
           const searchIndex = normalizeForIndex(searchParts.join(" "));
+
           const product = await tx.product.upsert({
-            where: {
-              storeId_externalId: {
-                storeId,
-                externalId: p.externalId,
-              },
-            },
+            where: { storeId_externalId: { storeId, externalId: p.externalId } },
             update: {
               nameLt: p.nameLt,
-              categoryLt: p.categoryLt || undefined,
-              brand: p.brand || undefined,
-              weightValue: p.weightValue || undefined,
-              weightUnit: p.weightUnit || undefined,
-              imageUrl: p.imageUrl || undefined,
-              productUrl: p.productUrl || undefined,
+              // Use null to actively clear removed fields, undefined to preserve existing
+              categoryLt: p.categoryLt || null,
+              brand: p.brand || null,
+              weightValue: p.weightValue ?? null,
+              weightUnit: p.weightUnit || null,
+              imageUrl: p.imageUrl || null,
+              productUrl: p.productUrl || null,
               searchIndex,
             },
             create: {
               storeId,
               externalId: p.externalId,
               nameLt: p.nameLt,
-              categoryLt: p.categoryLt || undefined,
-              brand: p.brand || undefined,
-              weightValue: p.weightValue || undefined,
-              weightUnit: p.weightUnit || undefined,
-              imageUrl: p.imageUrl || undefined,
-              productUrl: p.productUrl || undefined,
+              categoryLt: p.categoryLt || null,
+              brand: p.brand || null,
+              weightValue: p.weightValue ?? null,
+              weightUnit: p.weightUnit || null,
+              imageUrl: p.imageUrl || null,
+              productUrl: p.productUrl || null,
               searchIndex,
             },
           });
 
+          // Always record the price — both for new products (initial price) and
+          // existing ones (price change tracking)
           await tx.priceRecord.create({
             data: {
               productId: product.id,
               regularPrice: p.regularPrice,
-              salePrice: p.salePrice || undefined,
-              unitPrice: p.unitPrice || undefined,
-              unitLabel: p.unitLabel || undefined,
-              loyaltyPrice: p.loyaltyPrice || undefined,
-              campaignText: p.campaignText || undefined,
+              salePrice: p.salePrice ?? null,
+              unitPrice: p.unitPrice ?? null,
+              unitLabel: p.unitLabel || null,
+              loyaltyPrice: p.loyaltyPrice ?? null,
+              campaignText: p.campaignText || null,
             },
           });
+
+          if (isNew) {
+            newCount++;
+            knownIds.add(p.externalId); // prevent double-counting within batches
+          }
+          saved++;
         } catch (err) {
           console.warn(`[ScrapeJob] Product save error (${p.externalId}):`, err);
         }
@@ -255,71 +294,145 @@ async function saveProducts(storeId: number, products: ScrapedProduct[]) {
       console.warn(`[ScrapeJob] Batch transaction error (batch ${i / BATCH + 1}):`, err);
     });
   }
+
+  return { saved, newCount };
 }
 
-async function translateNewProducts() {
-  try {
-    let totalTranslated = 0;
+/**
+ * Multi-pass deduplication within each store.
+ *
+ * Pass 1 — URL-normalised: strip query/hash/trailing-slash, lowercase.
+ *   Catches query-param variants of the same product page.
+ *
+ * Pass 2 — externalId numeric-suffix: "LT-12345" and "12345" in the same store
+ *   are the same item. Rimi historically emitted both formats, creating ~6 500
+ *   duplicate rows.
+ *
+ * Pass 3 — name + imageUrl (conservative): same normalised Lithuanian name AND
+ *   same imageUrl within a store. Guards against renamed externalIds with no
+ *   stable URL.
+ *
+ * In every pass: prefer the enriched product as survivor, otherwise keep the
+ * oldest row (lowest id). Price records are re-parented; duplicate rows deleted.
+ */
+async function deduplicateProducts(): Promise<number> {
+  let totalRemoved = 0;
 
-    // Translate in batches of 200 until all done
-    while (true) {
-      const untranslated = await prisma.product.findMany({
-        where: { nameEn: null },
-        select: { id: true, nameLt: true, categoryLt: true },
-        take: 200,
-      });
+  // ── helpers ──────────────────────────────────────────────────────────────
 
-      if (untranslated.length === 0) break;
-
-      console.log(`[Translate] Translating batch of ${untranslated.length} products...`);
-
-      const names = untranslated.map((p) => p.nameLt);
-      const translatedNames = await translateBatch(names);
-
-      // Translate categories too
-      const categories = untranslated
-        .map((p) => p.categoryLt)
-        .filter((c): c is string => !!c);
-      const uniqueCategories = [...new Set(categories)];
-      const translatedCategories = await translateBatch(uniqueCategories);
-      const catMap = new Map<string, string>();
-      uniqueCategories.forEach((c, i) => catMap.set(c, translatedCategories[i]));
-
-      // Update products with translations and rebuild searchIndex
-      for (let i = 0; i < untranslated.length; i++) {
-        const nameEn = translatedNames[i];
-        const categoryEn = untranslated[i].categoryLt
-          ? catMap.get(untranslated[i].categoryLt!) || undefined
-          : undefined;
-
-        const searchParts = [
-          untranslated[i].nameLt,
-          nameEn,
-          untranslated[i].categoryLt,
-          categoryEn,
-        ].filter(Boolean);
-        const searchIndex = normalizeForIndex(searchParts.join(" "));
-
-        await prisma.product.update({
-          where: { id: untranslated[i].id },
-          data: {
-            nameEn,
-            categoryEn,
-            searchIndex,
-          },
-        });
-      }
-
-      totalTranslated += untranslated.length;
-      console.log(`[Translate] Batch done (${totalTranslated} total so far)`);
-    }
-
-    if (totalTranslated > 0) {
-      console.log(`[Translate] Finished — translated ${totalTranslated} products total`);
-    }
-  } catch (err) {
-    console.error("[Translate] Error:", err);
+  function pickSurvivor<T extends { id: number; enrichment: string | null }>(
+    group: T[]
+  ): { survivorId: number; dupeIds: number[] } {
+    const sorted = [...group].sort((a, b) => a.id - b.id);
+    const enriched = sorted.find((p) => p.enrichment !== null);
+    const survivor = enriched ?? sorted[0];
+    return {
+      survivorId: survivor.id,
+      dupeIds: sorted.filter((p) => p.id !== survivor.id).map((p) => p.id),
+    };
   }
+
+  async function mergeDupes(survivorId: number, dupeIds: number[]) {
+    if (dupeIds.length === 0) return;
+    await prisma.priceRecord.updateMany({
+      where: { productId: { in: dupeIds } },
+      data: { productId: survivorId },
+    });
+    await prisma.product.deleteMany({ where: { id: { in: dupeIds } } });
+  }
+
+  // ── Pass 1: URL-normalised ────────────────────────────────────────────────
+  {
+    const rows = await prisma.product.findMany({
+      where: { productUrl: { not: null } },
+      select: { id: true, storeId: true, productUrl: true, enrichment: true },
+    });
+
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const norm = p.productUrl!
+        .split("?")[0].split("#")[0].toLowerCase().replace(/\/$/, "");
+      const key = `${p.storeId}::${norm}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+
+    let pass1 = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      pass1 += dupeIds.length;
+    }
+    if (pass1 > 0) console.log(`[Dedup] Pass 1 (URL norm): removed ${pass1}`);
+    totalRemoved += pass1;
+  }
+
+  // ── Pass 2: externalId numeric-suffix ────────────────────────────────────
+  {
+    const rows = await prisma.product.findMany({
+      select: { id: true, storeId: true, externalId: true, enrichment: true },
+    });
+
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const m = p.externalId.match(/(\d{4,})$/); // 4+ digit suffix
+      if (!m) continue;
+      const key = `${p.storeId}::${m[1]}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+
+    let pass2 = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      if (new Set(group.map((p) => p.externalId)).size < 2) continue; // already same id
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      pass2 += dupeIds.length;
+    }
+    if (pass2 > 0) console.log(`[Dedup] Pass 2 (externalId suffix): removed ${pass2}`);
+    totalRemoved += pass2;
+  }
+
+  // ── Pass 3: normalised name + imageUrl (conservative) ────────────────────
+  {
+    const rows = await prisma.product.findMany({
+      where: { imageUrl: { not: null } },
+      select: { id: true, storeId: true, nameLt: true, imageUrl: true, enrichment: true },
+    });
+
+    const normName = (s: string) =>
+      s.toLowerCase()
+        .replace(/\d+\s*(kg|g|ml|l|vnt|pak)/gi, "")
+        .replace(/[,.\-–]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const nn = normName(p.nameLt);
+      if (!nn || nn.length < 4) continue;
+      const key = `${p.storeId}::${nn}::${p.imageUrl}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+
+    let pass3 = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      pass3 += dupeIds.length;
+    }
+    if (pass3 > 0) console.log(`[Dedup] Pass 3 (name+image): removed ${pass3}`);
+    totalRemoved += pass3;
+  }
+
+  if (totalRemoved > 0) {
+    console.log(`[Dedup] Total removed: ${totalRemoved} duplicate product(s)`);
+  }
+  return totalRemoved;
 }
 
 async function cleanupOldRecords() {
@@ -339,20 +452,5 @@ async function cleanupOldRecords() {
     }
   } catch (err) {
     console.error("[Cleanup] Error:", err);
-  }
-}
-
-async function notifyEmbedder() {
-  const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
-  try {
-    const res = await fetch(`${embedderUrl}/process`, { method: "POST" });
-    if (res.ok) {
-      const data = await res.json();
-      console.log(`[Embedder] Processing complete:`, data);
-    } else {
-      console.warn(`[Embedder] Process returned ${res.status}`);
-    }
-  } catch {
-    console.warn("[Embedder] Service not available, skipping embedding generation");
   }
 }

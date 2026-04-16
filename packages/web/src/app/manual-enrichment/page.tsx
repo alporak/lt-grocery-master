@@ -33,8 +33,20 @@ import {
   RefreshCw,
   Save,
   Cpu,
-  Square,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
+
+function timeAgo(date: Date): string {
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60) return `<1m`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -60,15 +72,28 @@ interface SaveResult {
   errors: string[];
 }
 
-interface BulkEnrichStatus {
-  running: boolean;
-  total: number;
-  done: number;
-  failed: number;
-  active_workers: number;
-  error: string | null;
-  started_at: number | null;
-  finished_at: number | null;
+interface ScrapeLogEntry {
+  id: number;
+  status: string;
+  productCount: number;
+  errorMessage: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+interface StoreStatus {
+  id: number;
+  name: string;
+  chain: string;
+  lastScrapedAt: string | null;
+  productCount: number;
+  recentLogs: ScrapeLogEntry[];
+}
+
+interface PipelineState {
+  status: string;
+  newProducts?: number;
+  finishedAt?: string;
 }
 
 type Step = "config" | "prompt" | "paste" | "preview" | "saved";
@@ -107,7 +132,8 @@ export default function ManualEnrichmentPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState<string | null>(null);
-  const [bulkStatus, setBulkStatus] = useState<BulkEnrichStatus | null>(null);
+  const [storeStatuses, setStoreStatuses] = useState<StoreStatus[]>([]);
+  const [pipelineState, setPipelineState] = useState<PipelineState | null>(null);
 
   // Step tracking
   const [step, setStep] = useState<Step>("config");
@@ -149,25 +175,25 @@ export default function ManualEnrichmentPage() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    // Load scrape status + pipeline state + enrichment counts upfront
+    fetch("/api/scrape-status")
+      .then((r) => r.json())
+      .then((d: StoreStatus[]) => setStoreStatuses(d))
+      .catch(() => {});
 
-    const fetchBulkStatus = async () => {
-      try {
-        const res = await fetch("/api/bulk-enrich", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as BulkEnrichStatus;
-        if (!cancelled) setBulkStatus(data);
-      } catch {
-        if (!cancelled) setBulkStatus(null);
-      }
-    };
+    fetch("/api/admin")
+      .then((r) => r.json())
+      .then((d: PipelineState) => setPipelineState(d))
+      .catch(() => {});
 
-    fetchBulkStatus();
-    const timer = setInterval(fetchBulkStatus, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    // Pre-load enrichment totals so the summary shows before a batch is loaded
+    fetch("/api/manual-enrichment?batchSize=1&mode=unenriched")
+      .then((r) => r.json())
+      .then((d) => {
+        setTotalUnenriched(d.totalUnenriched ?? 0);
+        setTotalAll(d.totalAll ?? 0);
+      })
+      .catch(() => {});
   }, []);
 
   // ── Load batch ──────────────────────────────────────────────────────
@@ -237,21 +263,8 @@ export default function ManualEnrichmentPage() {
 
   const userMessage = products.length > 0 ? buildUserMessage(products) : "";
   const fullPrompt = products.length > 0 ? buildFullPrompt(products) : "";
-  const statusTotal = bulkStatus?.total ?? 0;
-  const statusProcessed = (bulkStatus?.done ?? 0) + (bulkStatus?.failed ?? 0);
-  // Progress % = successfully enriched / total (not including failures)
-  const statusPct = statusTotal > 0 ? Math.min(100, Math.round(((bulkStatus?.done ?? 0) / statusTotal) * 100)) : 0;
-  const hasFailed = (bulkStatus?.failed ?? 0) > 0;
-
-  const stopEnrichment = async () => {
-    try {
-      await fetch("/api/admin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop-all" }),
-      });
-    } catch { /* ignore */ }
-  };
+  const enrichedCount = totalAll - totalUnenriched;
+  const enrichedPct = totalAll > 0 ? Math.round((enrichedCount / totalAll) * 100) : 0;
 
   // ── Copy helpers ────────────────────────────────────────────────────
 
@@ -433,74 +446,102 @@ export default function ManualEnrichmentPage() {
         })}
       </div>
 
-      {/* ── Live enrichment status ───────────────────────────────────── */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-1">
-              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Enrichment Status</p>
-              <div className="flex items-center gap-2 text-sm">
-                {bulkStatus?.running ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                    <span className="font-medium text-primary">Running</span>
-                    <button
-                      onClick={stopEnrichment}
-                      className="flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
-                    >
-                      <Square className="h-2.5 w-2.5" /> Stop
-                    </button>
-                  </>
-                ) : (
-                  <span className="font-medium text-muted-foreground">
-                    {!bulkStatus?.running && hasFailed && statusTotal > 0 ? (
-                      <span className="text-amber-600">Done with {bulkStatus?.failed} failures — products will retry next run</span>
-                    ) : "Idle"}
-                  </span>
-                )}
-                {bulkStatus?.error && <span className="text-destructive text-xs">• {bulkStatus.error}</span>}
+      {/* ── Scrape + Enrichment Summary ──────────────────────────────── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Last scrape results */}
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Last Scrape</p>
+              {pipelineState?.finishedAt && (
+                <span className="text-xs text-muted-foreground">
+                  {timeAgo(new Date(pipelineState.finishedAt))} ago
+                </span>
+              )}
+            </div>
+
+            {storeStatuses.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No scrape data yet</p>
+            ) : (
+              <div className="space-y-1.5">
+                {storeStatuses.map((store) => {
+                  const latest = store.recentLogs[0];
+                  const ok = latest?.status === "success";
+                  const err = latest?.status === "error";
+                  const running = latest?.status === "running";
+                  return (
+                    <div key={store.id} className="flex items-center gap-2 text-xs">
+                      {running ? (
+                        <Loader2 className="h-3 w-3 text-primary animate-spin shrink-0" />
+                      ) : ok ? (
+                        <CheckCircle2 className="h-3 w-3 text-green-500 shrink-0" />
+                      ) : err ? (
+                        <XCircle className="h-3 w-3 text-destructive shrink-0" />
+                      ) : (
+                        <span className="h-3 w-3 shrink-0" />
+                      )}
+                      <span className="w-24 font-medium truncate">{store.name}</span>
+                      <span className="font-mono text-muted-foreground">
+                        {store.productCount.toLocaleString()} products
+                      </span>
+                      {latest && (
+                        <span className="text-muted-foreground ml-auto shrink-0">
+                          {latest.productCount > 0 ? `+${latest.productCount.toLocaleString()} scraped` : ""}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {(pipelineState?.newProducts ?? 0) > 0 && (
+              <div className="pt-2 border-t">
+                <p className="text-xs font-medium text-amber-600">
+                  {pipelineState!.newProducts} new products from last run — need enrichment
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Enrichment progress */}
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Enrichment Progress</p>
+
+            <div className="flex gap-6">
+              <div>
+                <p className="text-2xl font-bold text-green-600">{enrichedCount.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground">enriched</p>
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-amber-600">{totalUnenriched.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground">need enrichment</p>
+              </div>
+              <div>
+                <p className="text-2xl font-bold">{totalAll.toLocaleString()}</p>
+                <p className="text-xs text-muted-foreground">total</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-5 text-xs">
-              <div>
-                <p className="text-muted-foreground">Processed</p>
-                <p className="font-mono">{statusProcessed} / {statusTotal}</p>
-              </div>
-              <div>
-                <p className="text-muted-foreground">Done</p>
-                <p className="font-mono text-green-600">{bulkStatus?.done ?? 0}</p>
-              </div>
-              <div>
-                <p className="text-muted-foreground">Failed</p>
-                <p className={`font-mono ${hasFailed ? "text-amber-600" : "text-muted-foreground"}`}>{bulkStatus?.failed ?? 0}</p>
-              </div>
-              <div>
-                <p className="text-muted-foreground">Workers</p>
-                <p className="font-mono">{bulkStatus?.active_workers ?? 0}</p>
-              </div>
-            </div>
-          </div>
-
-          {statusTotal > 0 && (
-            <div className="mt-3 space-y-1">
-              <div className="flex justify-between text-xs text-muted-foreground">
-                <span>Progress (enriched)</span>
-                <span>{statusPct}%{hasFailed ? ` · ${bulkStatus?.failed} failed` : ""}</span>
-              </div>
-              <div className="h-2 rounded-full bg-muted overflow-hidden flex">
-                <div className="h-full bg-primary transition-all duration-500" style={{ width: `${statusPct}%` }} />
-                {hasFailed && statusTotal > 0 && (
+            {totalAll > 0 && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>Enriched</span>
+                  <span>{enrichedPct}%</span>
+                </div>
+                <div className="h-2 rounded-full bg-muted overflow-hidden flex">
                   <div
-                    className="h-full bg-amber-400 transition-all duration-500"
-                    style={{ width: `${Math.round(((bulkStatus?.failed ?? 0) / statusTotal) * 100)}%` }}
+                    className="h-full bg-green-500 transition-all duration-500"
+                    style={{ width: `${enrichedPct}%` }}
                   />
-                )}
+                </div>
               </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
       {/* ── Step 1: Config ───────────────────────────────────────────── */}
       <Card>

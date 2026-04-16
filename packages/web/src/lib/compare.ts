@@ -1,5 +1,5 @@
 import { prisma } from "./db";
-import { normalizeText, buildSearchConditions, semanticSearch } from "./search";
+import { normalizeText, buildFlexibleConditions, scoreRelevance, semanticSearch } from "./search";
 import { haversineDistance } from "./distance";
 import { computeLineCost } from "./cost";
 export { computeLineCost } from "./cost";
@@ -376,7 +376,7 @@ async function _searchByName(
   });
 
   // Try semantic search first
-  const semanticResults = await semanticSearch(itemName, limit, [storeId]);
+  const semanticResults = await semanticSearch(itemName, limit * 3, [storeId]);
   if (semanticResults && semanticResults.length > 0) {
     const validResults = semanticResults.filter((r) => r.score >= 0.4);
     if (validResults.length > 0) {
@@ -385,33 +385,46 @@ async function _searchByName(
         include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
       });
       const productMap = new Map(products.map((p) => [p.id, p]));
+
+      // Combined score: embedding (60%) + keyword relevance (40%)
+      const combinedScored: Array<{ id: number; combined: number }> = [];
       for (const sr of validResults) {
-        if (seenIds.has(sr.id)) continue;
         const product = productMap.get(sr.id);
+        if (!product) continue;
+        const kw = scoreRelevance(itemName, {
+          nameLt: product.nameLt,
+          nameEn: product.nameEn,
+          searchIndex: product.searchIndex,
+          categoryLt: product.categoryLt,
+          brand: product.brand,
+        });
+        // Normalize kw score (typical max ~200) to 0–1
+        const kwNorm = Math.min(kw / 200, 1);
+        const combined = sr.score * 0.6 + kwNorm * 0.4;
+        combinedScored.push({ id: sr.id, combined });
+      }
+      combinedScored.sort((a, b) => b.combined - a.combined);
+
+      for (const { id, combined } of combinedScored) {
+        if (seenIds.has(id)) continue;
+        const product = productMap.get(id);
         if (product && product.priceRecords[0]) {
-          candidates.push(toMatch(product, product.priceRecords[0], sr.score));
+          candidates.push(toMatch(product, product.priceRecords[0], combined));
           seenIds.add(product.id);
         }
       }
     }
   }
 
-  // Keyword fallback
+  // Keyword fallback — uses synonym-expanded per-word OR conditions
   if (candidates.length < limit) {
-    const normalized = normalizeText(itemName);
-    const words = normalized.split(/\s+/).filter((w) => w.length > 2);
-    if (words.length > 0) {
+    const flexConditions = buildFlexibleConditions(itemName);
+    if (flexConditions.length > 0) {
       const products = await prisma.product.findMany({
         where: {
           storeId,
           id: { notIn: Array.from(seenIds) },
-          AND: words.map((word) => ({
-            OR: [
-              { searchIndex: { contains: word } },
-              { nameLt: { contains: word } },
-              { nameEn: { contains: word } },
-            ],
-          })),
+          AND: flexConditions,
         },
         include: {
           priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
@@ -419,24 +432,29 @@ async function _searchByName(
         take: limit * 2,
       });
 
-      const scored = products.map((p) => {
-        const name = normalizeText(language === "en" ? p.nameEn || p.nameLt : p.nameLt);
-        const similarity = calculateSimilarity(normalized, name);
-        return { product: p, similarity };
-      });
-      scored.sort((a, b) => b.similarity - a.similarity);
+      const scored = products.map((p) => ({
+        product: p,
+        score: scoreRelevance(itemName, {
+          nameLt: p.nameLt,
+          nameEn: p.nameEn,
+          searchIndex: p.searchIndex,
+          categoryLt: p.categoryLt,
+          brand: p.brand,
+        }),
+      }));
+      scored.sort((a, b) => b.score - a.score);
 
-      for (const { product, similarity } of scored) {
+      for (const { product, score } of scored) {
         if (candidates.length >= limit) break;
         if (seenIds.has(product.id)) continue;
         const pr = product.priceRecords[0];
         if (!pr) continue;
-        candidates.push(toMatch(product, pr, similarity));
+        candidates.push(toMatch(product, pr, score / 200));
         seenIds.add(product.id);
       }
     }
 
-    // Single-word fallback
+    // Single-word fallback (last resort)
     if (candidates.length === 0) {
       const normalized = normalizeText(itemName);
       const words = normalized.split(/\s+/).filter((w) => w.length > 2);
@@ -481,6 +499,138 @@ async function findBestMatch(
 ): Promise<StoreMatch | null> {
   const candidates = await findCandidates(storeId, itemName, language, 1);
   return candidates[0] || null;
+}
+
+/**
+ * Given a reference product (already chosen in one store),
+ * find the best matching products in all other enabled stores,
+ * filtered by canonicalCategory to prevent cross-category contamination.
+ */
+export async function findSimilarByProduct(
+  productId: number,
+  language: string = "lt",
+): Promise<Record<number, StoreMatch[]>> {
+  const refProduct = await prisma.product.findUnique({
+    where: { id: productId },
+    include: {
+      store: true,
+      priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
+    },
+  });
+  if (!refProduct) return {};
+
+  const otherStores = await prisma.store.findMany({
+    where: { enabled: true, id: { not: refProduct.storeId } },
+  });
+
+  // Build a rich search query from the reference product
+  const searchQuery = [refProduct.brand, refProduct.nameLt]
+    .filter(Boolean)
+    .join(" ");
+
+  const results: Record<number, StoreMatch[]> = {};
+
+  const toMatch = (product: any, pr: any, score?: number): StoreMatch => ({
+    productId: product.id,
+    productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
+    price: pr.regularPrice,
+    unitPrice: pr.unitPrice ?? undefined,
+    salePrice: pr.salePrice ?? undefined,
+    loyaltyPrice: pr.loyaltyPrice ?? undefined,
+    brand: product.brand ?? undefined,
+    weightValue: product.weightValue ?? undefined,
+    weightUnit: product.weightUnit ?? undefined,
+    imageUrl: product.imageUrl ?? undefined,
+    nameLt: product.nameLt,
+    nameEn: product.nameEn ?? undefined,
+    categoryLt: product.categoryLt ?? undefined,
+    score,
+  });
+
+  await Promise.all(
+    otherStores.map(async (store) => {
+      const semanticResults = await semanticSearch(searchQuery, 30, [store.id]);
+      const storeMatches: StoreMatch[] = [];
+
+      if (semanticResults && semanticResults.length > 0) {
+        const validResults = semanticResults.filter((r) => r.score >= 0.45);
+        if (validResults.length > 0) {
+          const products = await prisma.product.findMany({
+            where: {
+              id: { in: validResults.map((r) => r.id) },
+              // Filter by same category to avoid cross-category contamination
+              ...(refProduct.canonicalCategory
+                ? { canonicalCategory: refProduct.canonicalCategory }
+                : {}),
+            },
+            include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
+          });
+
+          const productMap = new Map(products.map((p) => [p.id, p]));
+          const combinedScored: Array<{ id: number; combined: number }> = [];
+
+          for (const sr of validResults) {
+            const product = productMap.get(sr.id);
+            if (!product) continue;
+
+            let combined = sr.score;
+            // Bonus: same weight/size
+            if (
+              refProduct.weightValue &&
+              product.weightValue === refProduct.weightValue &&
+              product.weightUnit === refProduct.weightUnit
+            ) {
+              combined += 0.15;
+            }
+            // Bonus: same brand
+            if (
+              refProduct.brand &&
+              product.brand &&
+              normalizeText(product.brand) === normalizeText(refProduct.brand)
+            ) {
+              combined += 0.2;
+            }
+            combinedScored.push({ id: sr.id, combined });
+          }
+
+          combinedScored.sort((a, b) => b.combined - a.combined);
+          for (const { id, combined } of combinedScored.slice(0, 5)) {
+            const product = productMap.get(id);
+            if (!product?.priceRecords[0]) continue;
+            storeMatches.push(toMatch(product, product.priceRecords[0], combined));
+          }
+        }
+      }
+
+      // Keyword fallback if semantic found nothing
+      if (storeMatches.length === 0) {
+        const flexConditions = buildFlexibleConditions(refProduct.nameLt);
+        if (flexConditions.length > 0) {
+          const products = await prisma.product.findMany({
+            where: {
+              storeId: store.id,
+              AND: flexConditions,
+              ...(refProduct.canonicalCategory
+                ? { canonicalCategory: refProduct.canonicalCategory }
+                : {}),
+            },
+            include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
+            take: 5,
+          });
+          for (const product of products) {
+            if (!product.priceRecords[0]) continue;
+            storeMatches.push(toMatch(product, product.priceRecords[0]));
+          }
+        }
+      }
+
+      if (storeMatches.length > 0) {
+        results[store.id] = storeMatches;
+      }
+    })
+  );
+
+  return results;
 }
 
 function calculateSimilarity(a: string, b: string): number {

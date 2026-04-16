@@ -66,10 +66,9 @@ export interface ProductForPrompt {
 /** Replicates Python's _build_product_text() */
 export function buildProductText(p: ProductForPrompt): string {
   const parts = [p.nameLt];
-  if (p.nameEn) parts.push(p.nameEn);
   if (p.categoryLt) parts.push(p.categoryLt);
-  if (p.brand) parts.push(p.brand);
-  return parts.join(" | ");
+  if (p.brand && !p.nameLt.toLowerCase().includes(p.brand.toLowerCase())) parts.push(p.brand);
+  return parts.join("|");
 }
 
 /** Build the full prompt to send to the LLM (system + user message combined for easy copy-paste) */

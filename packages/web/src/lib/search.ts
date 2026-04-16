@@ -75,7 +75,7 @@ const SYNONYM_GROUPS: string[][] = [
 ];
 
 // Map each term to its synonym group for O(1) lookup
-const SYNONYM_MAP = new Map<string, string[]>();
+export const SYNONYM_MAP = new Map<string, string[]>();
 for (const group of SYNONYM_GROUPS) {
   for (const term of group) {
     SYNONYM_MAP.set(term.toLowerCase(), group);
@@ -227,6 +227,35 @@ export function scoreRelevance(
     if (cat.includes(w)) score += 5;
     if (brand.includes(w)) score += 5;
     if (idx.includes(w) && !nameLt.includes(w)) score += 3;
+
+    // Synonym boost: if the product name contains a synonym of this query word
+    const synGroup = SYNONYM_MAP.get(w);
+    if (synGroup) {
+      let synMatched = false;
+      for (const syn of synGroup) {
+        const synNorm = normalizeText(syn);
+        if ((nameLt.includes(synNorm) || nameEn.includes(synNorm)) && synNorm !== w) {
+          score += 15;
+          synMatched = true;
+          break;
+        }
+      }
+      // Prefix-based synonym lookup (e.g. query "sviest" matches group containing "sviestas")
+      if (!synMatched) {
+        for (const [key, group] of SYNONYM_MAP) {
+          if (key.startsWith(w) && w.length >= 4 && key !== w) {
+            for (const syn of group) {
+              const synNorm = normalizeText(syn);
+              if (nameLt.includes(synNorm) || nameEn.includes(synNorm)) {
+                score += 10;
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
   }
 
   // Word coverage: what fraction of query words matched the name
@@ -242,6 +271,59 @@ export function scoreRelevance(
   if (nameWordCount > 8) score -= (nameWordCount - 8) * 2;
 
   return score;
+}
+
+/**
+ * Build per-word AND conditions where each word's OR includes its synonyms.
+ * Fixes cases like "linguine pasta" → AND[contains(linguine), OR(contains(pasta), contains(makaronai), contains(makaron))]
+ * which matches "Makaronai LINGUINE" in the database.
+ *
+ * Returns Prisma AND-array ready to use as `{ AND: buildFlexibleConditions(...) }`.
+ */
+export function buildFlexibleConditions(itemName: string): Record<string, unknown>[] {
+  const normalized = normalizeText(itemName);
+  const words = normalized.split(/\s+/).filter((w) => w.length >= 2);
+  if (words.length === 0) return [];
+
+  return words.map((word) => {
+    // Collect all alternative terms for this word
+    const alternatives = new Set<string>([word]);
+
+    // Direct match in synonym map
+    const directGroup = SYNONYM_MAP.get(word);
+    if (directGroup) {
+      for (const syn of directGroup) {
+        const synNorm = normalizeText(syn);
+        // Add each word of the synonym phrase individually
+        for (const part of synNorm.split(/\s+/).filter((p) => p.length >= 2)) {
+          alternatives.add(part);
+        }
+      }
+    }
+
+    // Prefix match (e.g. "makaron" → matches "makaronai" group key)
+    if (!directGroup && word.length >= 4) {
+      for (const [key, group] of SYNONYM_MAP) {
+        if (key.startsWith(word)) {
+          for (const syn of group) {
+            const synNorm = normalizeText(syn);
+            for (const part of synNorm.split(/\s+/).filter((p) => p.length >= 2)) {
+              alternatives.add(part);
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    const termConditions = [...alternatives].flatMap((term) => [
+      { searchIndex: { contains: term } },
+      { nameLt: { contains: term } },
+      { nameEn: { contains: term } },
+    ]);
+
+    return { OR: termConditions };
+  });
 }
 
 const EMBEDDER_URL = process.env.EMBEDDER_URL || "http://embedder:8000";

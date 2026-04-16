@@ -65,22 +65,22 @@ Each classification object must have:
 - attributes: object with filterable properties (type, flavor, scent, packaging, etc.)
 
 Example input:
-1: Rokiškio pienas 2.5%, 1L | Rokiškio milk 2.5% fat | Pieno produktai | Rokiškio
-2: Fairy indų ploviklis Lemon 900ml | Fairy dish soap Lemon 900ml | Valymo priemonės
+1: Rokiškio pienas 2.5%, 1L|Pieno produktai
+2: Fairy indų ploviklis Lemon 900ml|Valymo priemonės
 
 Example output:
 {"1":{"name_clean":"Rokiškio Milk 2.5% Fat 1L","is_food":true,"primary_category":"Dairy","tags_en":["milk","fresh milk","dairy","rokiškio","low fat"],"tags_lt":["pienas","šviežias pienas","rokiškio","pieno produktai"],"attributes":{"type":"fresh","packaging":"carton"}},"2":{"name_clean":"Fairy Dish Soap Lemon 900ml","is_food":false,"primary_category":"Cleaning Products","tags_en":["dish soap","dishwashing","cleaning","fairy","lemon"],"tags_lt":["indų ploviklis","valymo priemonė","fairy","citrinos kvapas"],"attributes":{"type":"liquid","scent":"lemon"}}}"""
 
 
 def build_product_text(row) -> str:
-    parts = [row["nameLt"]]
-    if row["nameEn"]:
-        parts.append(row["nameEn"])
+    name_lt = row["nameLt"]
+    parts = [name_lt]
     if row["categoryLt"]:
         parts.append(row["categoryLt"])
-    if row["brand"]:
-        parts.append(row["brand"])
-    return " | ".join(parts)
+    brand = row["brand"]
+    if brand and brand.lower() not in name_lt.lower():
+        parts.append(brand)
+    return "|".join(parts)
 
 
 def get_db():

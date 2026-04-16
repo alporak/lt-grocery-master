@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { X, ExternalLink, Plus, Loader2 } from "lucide-react";
@@ -83,6 +84,12 @@ const CHAIN_TEXT: Record<string, string> = {
 export function ProductPreviewModal({ productId, onClose, onAddToList }: ProductPreviewModalProps) {
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    return () => setMounted(false);
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -118,9 +125,11 @@ export function ProductPreviewModal({ productId, onClose, onAddToList }: Product
     ? Math.min(latestPrice.regularPrice, latestPrice.salePrice ?? Infinity, latestPrice.loyaltyPrice ?? Infinity)
     : null;
 
-  return (
+  if (!mounted) return null;
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4"
+      className="fixed inset-0 z-[200] bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4"
       onClick={handleBackdrop}
     >
       <div className="bg-background w-full sm:max-w-2xl sm:rounded-xl rounded-t-xl shadow-2xl max-h-[92dvh] overflow-y-auto flex flex-col">
@@ -335,6 +344,7 @@ export function ProductPreviewModal({ productId, onClose, onAddToList }: Product
           <Button variant="outline" onClick={onClose}>Close</Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

@@ -121,10 +121,14 @@ export class RimiScraper extends BaseScraper {
       await page.waitForSelector('a[href*="/p/"]', { timeout: 15000 }).catch(() => {});
       await this.delay(1500);
 
-      // Extract products from the page
+      // Extract products from the page.
+      // Always use the numeric ID from the /p/XXXXX URL segment — it is the only
+      // stable identifier across scrapes. data-product-code is intentionally ignored
+      // because its format ("LT-12345" vs "12345") can differ from the URL-based ID,
+      // causing the same product to be inserted twice and grow unboundedly.
       const pageProducts = await page.$$eval(
-        '[data-product-code], .product-grid__item, a[href*="/p/"]',
-        (elements: Element[]) => {
+        'a[href*="/p/"]',
+        (links: Element[]) => {
           const results: Array<{
             externalId: string;
             name: string;
@@ -134,44 +138,44 @@ export class RimiScraper extends BaseScraper {
           }> = [];
           const seen = new Set<string>();
 
-          for (const el of elements) {
-            // Try to get product code from data attribute
-            let externalId =
-              el.getAttribute("data-product-code") || "";
+          for (const el of links) {
+            const href = (el as HTMLAnchorElement).href;
 
-            // Find the product link
-            const link =
-              el.tagName === "A"
-                ? (el as HTMLAnchorElement)
-                : el.querySelector('a[href*="/p/"]');
-            if (!link) continue;
-            const href = (link as HTMLAnchorElement).href;
-
-            // Extract product ID from /p/XXXXX
-            if (!externalId) {
-              const pMatch = href.match(/\/p\/(\d+)/);
-              externalId = pMatch ? pMatch[1] : href;
-            }
-
-            if (!externalId || seen.has(externalId)) continue;
+            // Stable ID: numeric segment after /p/ — skip if absent
+            const idMatch = href.match(/\/p\/(\d+)(?:[?#/]|$)/);
+            if (!idMatch) continue;
+            const externalId = idMatch[1];
+            if (seen.has(externalId)) continue;
             seen.add(externalId);
 
-            const cardText = el.textContent?.trim() || "";
-            const img = el.querySelector("img");
-            const name =
+            // Walk up to find the product card container
+            let card: Element = el;
+            for (let i = 0; i < 6; i++) {
+              if (!card.parentElement || card.parentElement === document.body) break;
+              // Stop when parent looks like a grid (many siblings = we're at card level)
+              if (card.parentElement.children.length > 3) break;
+              card = card.parentElement;
+            }
+
+            const img = card.querySelector("img");
+            const name = (
               img?.alt ||
-              el
-                .querySelector('[class*="name"], [class*="title"]')
-                ?.textContent?.trim() ||
-              cardText.split(/\d+[.,]\d+/)[0]?.trim().substring(0, 100) ||
-              "";
+              card.querySelector('[class*="name"], [class*="title"]')?.textContent?.trim() ||
+              el.textContent?.trim() ||
+              ""
+            ).split("\n")[0].trim().substring(0, 120);
+
+            if (!name) continue;
+
+            // Clean URL: strip query params and hash
+            const cleanUrl = href.split("?")[0].split("#")[0];
 
             results.push({
               externalId,
               name,
-              url: href,
-              priceText: cardText,
-              imageUrl: img?.src || null,
+              url: cleanUrl,
+              priceText: card.textContent || "",
+              imageUrl: img?.src || img?.getAttribute("data-src") || null,
             });
           }
           return results;

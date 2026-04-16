@@ -28,6 +28,7 @@ import {
   Database,
   ChevronDown,
   ChevronUp,
+  Layers,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -226,6 +227,10 @@ export default function AdvancedSettingsPage() {
   const [testingOllama, setTestingOllama] = useState(false);
   const [ollamaSaved, setOllamaSaved] = useState(false);
 
+  // Dedup state
+  const [deduping, setDeduping] = useState(false);
+  const [dedupResult, setDedupResult] = useState<{ removed: number; passes: { urlNorm: number; externalIdSuffix: number; nameImage: number } } | null>(null);
+
   // Pipeline state
   const [pipeline, setPipeline] = useState<PipelineState>({ status: "idle" });
   const [triggering, setTriggering] = useState(false);
@@ -343,6 +348,21 @@ export default function AdvancedSettingsPage() {
     const next = { ...providerModels, [providerName]: model };
     saveSwarmConfig(swarmProviders, next);
     setOpenModelPicker(null);
+  };
+
+  const runDedup = async () => {
+    setDeduping(true);
+    setDedupResult(null);
+    try {
+      const res = await fetch("/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "dedup" }),
+      });
+      const data = await res.json();
+      if (data.success) setDedupResult(data);
+    } catch { /* ignore */ }
+    setDeduping(false);
   };
 
   const rebuildDatabase = async () => {
@@ -514,6 +534,50 @@ export default function AdvancedSettingsPage() {
               </p>
             </div>
           </Link>
+
+          <div className="flex flex-col gap-2 p-4 rounded-lg border sm:col-span-2">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center w-10 h-10 rounded-md bg-muted shrink-0">
+                <Layers className="h-5 w-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium">
+                  {language === "lt" ? "Dublikatų šalinimas" : "Deduplicate Products"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {language === "lt"
+                    ? "3 etapai: URL, externalId sufixas, pavadinimas+nuotrauka"
+                    : "3 passes: URL, externalId suffix, name+image"}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={deduping}
+                onClick={runDedup}
+                className="gap-2 shrink-0"
+              >
+                {deduping ? <Loader2 className="h-3 w-3 animate-spin" /> : <Layers className="h-3 w-3" />}
+                {deduping
+                  ? (language === "lt" ? "Vykdoma..." : "Running...")
+                  : (language === "lt" ? "Vykdyti" : "Run")}
+              </Button>
+            </div>
+            {dedupResult && (
+              <div className="text-xs text-muted-foreground pl-[52px] space-y-0.5">
+                <p className={dedupResult.removed > 0 ? "text-green-600 dark:text-green-400 font-medium" : ""}>
+                  {dedupResult.removed > 0
+                    ? `Removed ${dedupResult.removed} duplicate(s)`
+                    : "No duplicates found"}
+                </p>
+                {dedupResult.removed > 0 && (
+                  <p>
+                    URL: {dedupResult.passes.urlNorm} &middot; externalId: {dedupResult.passes.externalIdSuffix} &middot; name+img: {dedupResult.passes.nameImage}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 

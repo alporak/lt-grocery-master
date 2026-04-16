@@ -27,12 +27,14 @@ import {
   ChevronDown,
   ChevronUp,
   ShoppingCart,
-  ArrowRight,
   Package,
   Info,
   Tag,
+  Pencil,
+  ClipboardList,
+  Loader2,
 } from "lucide-react";
-import { parseItem, formatParsed } from "@/lib/parse-item";
+import { parseItem, formatParsed, splitIngredientLine } from "@/lib/parse-item";
 import { computeLineCost } from "@/lib/cost";
 import { BrandPickerModal } from "@/components/BrandPickerModal";
 import { ProductPreviewModal } from "@/components/ProductPreviewModal";
@@ -147,25 +149,57 @@ export default function GroceryListDetailPage() {
   const params = useParams();
   const router = useRouter();
   const { t, language } = useI18n();
+
+  // Core data
   const [list, setList] = useState<GroceryList | null>(null);
-  const [newItem, setNewItem] = useState("");
-  const [newQty, setNewQty] = useState("1");
-  const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
-  const [comparing, setComparing] = useState(false);
   const [allLists, setAllLists] = useState<Array<{ id: number; name: string }>>([]);
   const [saving, setSaving] = useState(false);
+
+  // Tab control
+  const [activeTab, setActiveTab] = useState<"items" | "products" | "compare">("items");
+
+  // Inline rename
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+
+  // Mass import
+  const [importText, setImportText] = useState("");
+  const [importParsed, setImportParsed] = useState<Array<{ raw: string; parsed: ReturnType<typeof parseItem> }> | null>(null);
+  const [importAdding, setImportAdding] = useState(false);
+
+  // Single-item add
+  const [newItem, setNewItem] = useState("");
+  const [newQty, setNewQty] = useState("1");
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1);
   const [pickedSuggestion, setPickedSuggestion] = useState<Suggestion | null>(null);
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [editQty, setEditQty] = useState("");
   const [parsedPreview, setParsedPreview] = useState<string | null>(null);
-  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
-  const [selectedCandidates, setSelectedCandidates] = useState<Record<string, Record<number, number>>>({});
   const [dominantCategory, setDominantCategory] = useState<string | null>(null);
   const [showBrandPicker, setShowBrandPicker] = useState(false);
+
+  // Item list interaction
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editQty, setEditQty] = useState("");
+
+  // Products tab
+  const [productSuggestions, setProductSuggestions] = useState<Record<string, Suggestion[]>>({});
+  const [productSuggestionsLoading, setProductSuggestionsLoading] = useState(false);
+  const [categoryFilters, setCategoryFilters] = useState<Record<string, string | null>>({});
+
+  // Auto-match loading indicator (by itemName)
+  const [autoMatchLoading, setAutoMatchLoading] = useState<Set<string>>(new Set());
+
+  // Price comparison
+  const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+  const [selectedCandidates, setSelectedCandidates] = useState<Record<string, Record<number, number>>>({});
+
+  // Modals
   const [previewProductId, setPreviewProductId] = useState<number | null>(null);
+
   const suggestRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -195,7 +229,17 @@ export default function GroceryListDetailPage() {
       .catch(() => {});
   }, [fetchList, params.id]);
 
-  // Autocomplete suggestions — use parsed product name so "1.5 liter water" → "water"
+  // Auto-enter rename mode when navigated here with ?rename=1
+  useEffect(() => {
+    if (!list) return;
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("rename") === "1") {
+      setIsRenaming(true);
+      setRenameValue(list.name);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list?.id]); // only fire once when list first loads
+
+  // Autocomplete suggestions
   useEffect(() => {
     if (newItem.length < 2) {
       setSuggestions([]);
@@ -241,13 +285,56 @@ export default function GroceryListDetailPage() {
     setSaving(false);
   };
 
+  const commitRename = async () => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || !list || trimmed === list.name) {
+      setIsRenaming(false);
+      return;
+    }
+    setRenameSaving(true);
+    await fetch(`/api/grocery-lists/${params.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: trimmed }),
+    });
+    setList({ ...list, name: trimmed });
+    setIsRenaming(false);
+    setRenameSaving(false);
+  };
+
+  // Mass import
+  const handlePreviewImport = () => {
+    if (!importText.trim()) { setImportParsed(null); return; }
+    const lines = importText
+      .split("\n")
+      .flatMap(splitIngredientLine);
+    setImportParsed(lines.map((raw) => ({ raw, parsed: parseItem(raw) })));
+  };
+
+  const handleAddAll = async () => {
+    if (!importParsed || !list) return;
+    setImportAdding(true);
+    const newItems = importParsed.map(({ parsed }) => ({
+      itemName: parsed.name,
+      quantity: parsed.quantity,
+      unit: parsed.unit,
+      checked: false,
+    }));
+    const items = [...list.items, ...newItems];
+    setList({ ...list, items });
+    await saveItems(items);
+    setImportText("");
+    setImportParsed(null);
+    setImportAdding(false);
+    setProductSuggestions({});
+  };
+
   const addItem = async () => {
     if (!newItem.trim() || !list) return;
     let itemName = newItem.trim();
     let quantity = parseFloat(newQty) || 1;
     let unit: string | null = null;
 
-    // If user didn't pick a suggestion, parse the raw text
     if (!pickedSuggestion) {
       const parsed = parseItem(itemName);
       itemName = parsed.name;
@@ -269,6 +356,7 @@ export default function GroceryListDetailPage() {
     setPickedSuggestion(null);
     setSuggestions([]);
     setShowSuggestions(false);
+    setProductSuggestions({});
     await saveItems(items);
   };
 
@@ -289,6 +377,7 @@ export default function GroceryListDetailPage() {
     setPickedSuggestion(null);
     setSuggestions([]);
     setShowSuggestions(false);
+    setProductSuggestions({});
     await saveItems(items);
   };
 
@@ -318,6 +407,7 @@ export default function GroceryListDetailPage() {
     if (!list) return;
     const items = list.items.filter((_, i) => i !== index);
     setList({ ...list, items });
+    setProductSuggestions({});
     await saveItems(items);
   };
 
@@ -390,6 +480,11 @@ export default function GroceryListDetailPage() {
     setComparing(false);
   };
 
+  const handleFindPrices = async () => {
+    await comparePrices();
+    setActiveTab("compare");
+  };
+
   const importFromList = async (sourceId: string) => {
     await fetch(`/api/grocery-lists/${params.id}/import`, {
       method: "POST",
@@ -397,9 +492,25 @@ export default function GroceryListDetailPage() {
       body: JSON.stringify({ sourceId }),
     });
     fetchList();
+    setProductSuggestions({});
   };
 
-  // Toggle expanded state for a grocery item in comparison
+  const fetchProductSuggestions = async () => {
+    if (!list) return;
+    setProductSuggestionsLoading(true);
+    const results: Record<string, Suggestion[]> = {};
+    await Promise.all(
+      list.items.map(async (item) => {
+        const res = await fetch(
+          `/api/products/suggest?q=${encodeURIComponent(item.itemName)}&limit=6`
+        ).then((r) => r.json());
+        results[item.itemName] = Array.isArray(res) ? res : (res.suggestions || []);
+      })
+    );
+    setProductSuggestions(results);
+    setProductSuggestionsLoading(false);
+  };
+
   const toggleItemExpanded = (itemName: string) => {
     setExpandedItems((prev) => {
       const next = new Set(prev);
@@ -409,7 +520,6 @@ export default function GroceryListDetailPage() {
     });
   };
 
-  // Select a different candidate for an item in a store
   const selectCandidate = (itemName: string, storeId: number, candidateIndex: number) => {
     setSelectedCandidates((prev) => ({
       ...prev,
@@ -417,12 +527,60 @@ export default function GroceryListDetailPage() {
     }));
   };
 
-  // Get the effective match for an item in a store (respecting user selection)
-  const getEffectiveMatch = (itemName: string, storeId: number, storeResult: StoreCompareResult) => {
-    const storeItem = storeResult.items.find((i) => i.itemName === itemName);
-    if (!storeItem) return null;
-    const selectedIdx = selectedCandidates[itemName]?.[storeId] ?? 0;
-    return storeItem.candidates[selectedIdx] || storeItem.match;
+  /** Select a candidate and auto-match equivalent products in other stores. */
+  const selectAndAutoMatch = async (itemName: string, storeId: number, candidateIndex: number) => {
+    selectCandidate(itemName, storeId, candidateIndex);
+
+    if (!compareResult || !list) return;
+    const storeResult = compareResult.storeResults.find((s) => s.storeId === storeId);
+    const storeItem = storeResult?.items.find((i) => i.itemName === itemName);
+    const selectedProduct = storeItem?.candidates[candidateIndex];
+    if (!selectedProduct) return;
+
+    setAutoMatchLoading((prev) => new Set([...prev, itemName]));
+    try {
+      const similar: Record<string, Array<{
+        productId: number; productName: string; price: number; salePrice?: number;
+        loyaltyPrice?: number; unitPrice?: number; brand?: string;
+        weightValue?: number; weightUnit?: string; imageUrl?: string;
+        nameLt?: string; nameEn?: string; categoryLt?: string; score?: number;
+      }>> = await fetch("/api/products/similar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productId: selectedProduct.productId }),
+      }).then((r) => r.json());
+
+      const listItem = list.items.find((li) => li.itemName === itemName);
+      const qty = listItem?.quantity ?? 1;
+
+      setCompareResult((prev) => {
+        if (!prev) return prev;
+        const newStoreResults = prev.storeResults.map((sr) => {
+          if (sr.storeId === storeId) return sr; // leave source store unchanged
+          const matches = similar[String(sr.storeId)];
+          if (!matches || matches.length === 0) return sr;
+          const items = sr.items.map((item) => {
+            if (item.itemName !== itemName) return item;
+            const newCandidates = matches;
+            const newMatch = matches[0];
+            const lineCost = computeLineCost(newMatch, qty);
+            return { ...item, match: newMatch, candidates: newCandidates, lineCost };
+          });
+          const totalCost = items.reduce((s, i) => s + i.lineCost, 0);
+          const matchedCount = items.filter((i) => i.match !== null).length;
+          return { ...sr, items, totalCost, matchedCount };
+        });
+        return { ...prev, storeResults: newStoreResults };
+      });
+    } catch {
+      // auto-match failure is silent
+    } finally {
+      setAutoMatchLoading((prev) => {
+        const next = new Set(prev);
+        next.delete(itemName);
+        return next;
+      });
+    }
   };
 
   // Recalculate store totals based on current candidate selections
@@ -448,7 +606,6 @@ export default function GroceryListDetailPage() {
     });
   }, [compareResult, selectedCandidates, list]);
 
-  // Find cheapest store from recalculated results
   const cheapestRecalc = useMemo(() => {
     if (!recalculatedResults || !list) return null;
     const full = recalculatedResults.filter((s) => s.matchedCount === list.items.length);
@@ -458,7 +615,6 @@ export default function GroceryListDetailPage() {
     );
   }, [recalculatedResults, list]);
 
-  // Split shopping recalculated
   const splitRecalc = useMemo(() => {
     if (!recalculatedResults || !list) return null;
     const items = list.items.map((item) => {
@@ -466,7 +622,7 @@ export default function GroceryListDetailPage() {
       let bestStoreId = 0;
       let bestStoreName = "";
       let bestStoreChain = "";
-      let bestMatch: any = null;
+      let bestMatch: StoreCompareResult["items"][0]["match"] = null;
       for (const sr of recalculatedResults) {
         const si = sr.items.find((i) => i.itemName === item.itemName);
         if (si?.match && si.lineCost > 0 && si.lineCost < bestPrice) {
@@ -505,23 +661,145 @@ export default function GroceryListDetailPage() {
     PROMO: "text-purple-600",
   };
 
+  const itemCount = list.items.length;
+  const hasProductSuggestions = Object.keys(productSuggestions).length > 0;
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" onClick={() => router.back()}>
+    <div className="space-y-4">
+      {/* Header: back + inline-editable title */}
+      <div className="flex items-center gap-3">
+        <Button variant="ghost" size="icon" onClick={() => router.back()}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
-        <h1 className="text-2xl font-bold">{list.name}</h1>
-        {saving && (
+        {isRenaming ? (
+          <input
+            autoFocus
+            className="text-2xl font-bold bg-transparent border-b-2 border-primary outline-none flex-1 max-w-sm"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitRename();
+              if (e.key === "Escape") { setIsRenaming(false); setRenameValue(list.name); }
+            }}
+          />
+        ) : (
+          <h1
+            className="text-2xl font-bold cursor-pointer hover:text-primary transition-colors group flex items-center gap-2"
+            onClick={() => { setIsRenaming(true); setRenameValue(list.name); }}
+            title="Click to rename"
+          >
+            {list.name}
+            <Pencil className="h-4 w-4 opacity-0 group-hover:opacity-40 transition-opacity" />
+          </h1>
+        )}
+        {(saving || renameSaving) && (
           <Badge variant="secondary" className="text-xs animate-pulse">
-            {t("common.save")}...
+            {t("common.save")}…
           </Badge>
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Items editor */}
-        <div className="space-y-4">
+      {/* 3-tab layout */}
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
+        <TabsList className="w-full">
+          <TabsTrigger value="items" className="flex-1">
+            <ClipboardList className="h-3.5 w-3.5 mr-1.5" />
+            {language === "lt" ? "Prekės" : "Items"}
+            {itemCount > 0 && (
+              <span className="ml-1.5 text-xs opacity-70">({itemCount})</span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="products" className="flex-1" disabled={itemCount === 0}>
+            <Package className="h-3.5 w-3.5 mr-1.5" />
+            {language === "lt" ? "Produktai" : "Products"}
+          </TabsTrigger>
+          <TabsTrigger
+            value="compare"
+            className="flex-1"
+            disabled={!compareResult && itemCount === 0}
+          >
+            <Scale className="h-3.5 w-3.5 mr-1.5" />
+            {language === "lt" ? "Palyginti" : "Compare"}
+          </TabsTrigger>
+        </TabsList>
+
+        {/* ─── Tab 1: Items ─── */}
+        <TabsContent value="items" className="space-y-4 mt-4">
+          {/* Mass import */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <ClipboardList className="h-4 w-4" />
+                {language === "lt" ? "Įklijuoti prekes" : "Paste items"}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <textarea
+                className="w-full min-h-[90px] p-2.5 rounded-md border bg-background text-sm resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                placeholder={language === "lt"
+                  ? "pienas, duona\n2kg vištiena\n6 kiaušiniai"
+                  : "milk, bread\n2kg chicken\n6 eggs"}
+                value={importText}
+                onChange={(e) => { setImportText(e.target.value); setImportParsed(null); }}
+              />
+
+              {/* Parsed preview */}
+              {importParsed !== null && (
+                <div className="rounded-md bg-muted/50 p-3 text-sm">
+                  {importParsed.length === 0 ? (
+                    <p className="text-muted-foreground italic text-xs">Nothing to parse</p>
+                  ) : (
+                    <>
+                      <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">
+                        {language === "lt" ? "Bus pridėta:" : "You're adding:"}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {importParsed.map(({ parsed }, i) => (
+                          <Badge key={i} variant="secondary" className="text-xs">
+                            {parsed.name}
+                            {(parsed.quantity !== 1 || parsed.unit) && (
+                              <span className="ml-1 opacity-60">
+                                ×{parsed.quantity}{parsed.unit ? ` ${parsed.unit}` : ""}
+                              </span>
+                            )}
+                          </Badge>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handlePreviewImport}
+                  disabled={!importText.trim()}
+                >
+                  {language === "lt" ? "Peržiūrėti" : "Preview"}
+                </Button>
+                {importParsed !== null && importParsed.length > 0 && (
+                  <Button
+                    size="sm"
+                    onClick={handleAddAll}
+                    disabled={importAdding}
+                    className="gap-1.5"
+                  >
+                    {importAdding ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Plus className="h-3.5 w-3.5" />
+                    )}
+                    {language === "lt" ? `Pridėti viską (${importParsed.length})` : `Add All (${importParsed.length})`}
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Single-item add */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-lg">{t("groceryLists.addItem")}</CardTitle>
@@ -548,7 +826,6 @@ export default function GroceryListDetailPage() {
                           key={s.id}
                           className={`flex items-center gap-1 border-b last:border-0 ${i === selectedSuggestion ? "bg-accent" : ""}`}
                         >
-                          {/* Main row — click to fill input */}
                           <button
                             onClick={() => pickSuggestion(s)}
                             className="flex-1 text-left px-3 py-2 text-sm hover:bg-accent/50 flex items-center gap-2 min-w-0"
@@ -569,7 +846,6 @@ export default function GroceryListDetailPage() {
                               </span>
                             )}
                           </button>
-                          {/* Preview button */}
                           <button
                             onClick={(e) => { e.stopPropagation(); setPreviewProductId(s.id); setShowSuggestions(false); }}
                             className="p-2 text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors shrink-0"
@@ -577,7 +853,6 @@ export default function GroceryListDetailPage() {
                           >
                             <Info className="h-3.5 w-3.5" />
                           </button>
-                          {/* Direct add button */}
                           <button
                             onClick={(e) => { e.stopPropagation(); addSuggestionDirectly(s); }}
                             className="p-2 text-muted-foreground hover:text-primary hover:bg-accent/50 transition-colors shrink-0 mr-1"
@@ -650,37 +925,16 @@ export default function GroceryListDetailPage() {
                 </div>
               )}
 
-              {/* Live parse hint */}
               {liveHint && (
                 <div className="flex items-center gap-2 mt-1.5 text-xs text-muted-foreground">
                   <Info className="h-3 w-3 shrink-0" />
                   <span>{liveHint}</span>
                 </div>
               )}
-              {/* Post-add parsed preview */}
               {parsedPreview && (
                 <div className="flex items-center gap-2 mt-1.5 text-xs text-emerald-600 dark:text-emerald-400 animate-in fade-in">
                   <Check className="h-3 w-3" />
                   <span>Added: <strong>{parsedPreview}</strong></span>
-                </div>
-              )}
-
-              {/* Import from old list */}
-              {allLists.length > 0 && (
-                <div className="mt-3">
-                  <Select onValueChange={importFromList}>
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder={t("groceryLists.importFromOld")} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {allLists.map((l) => (
-                        <SelectItem key={l.id} value={String(l.id)}>
-                          <Download className="h-3 w-3 inline mr-2" />
-                          {l.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
                 </div>
               )}
             </CardContent>
@@ -709,16 +963,13 @@ export default function GroceryListDetailPage() {
             )}
             <CardContent className="p-0">
               {list.items.length === 0 ? (
-                <p className="text-center text-muted-foreground py-8">
-                  {t("groceryLists.noLists")}
+                <p className="text-center text-muted-foreground py-8 text-sm">
+                  {language === "lt" ? "Nėra prekių. Pridėkite aukščiau." : "No items yet. Add some above."}
                 </p>
               ) : (
                 <ul className="divide-y">
                   {list.items.map((item, index) => (
-                    <li
-                      key={index}
-                      className="flex items-center gap-3 px-4 py-3"
-                    >
+                    <li key={index} className="flex items-center gap-3 px-4 py-3">
                       <button
                         onClick={() => toggleCheck(index)}
                         className={`shrink-0 w-5 h-5 rounded border flex items-center justify-center transition-colors ${
@@ -787,460 +1038,686 @@ export default function GroceryListDetailPage() {
                   ))}
                 </ul>
               )}
+
+              {/* Import from another list */}
+              {allLists.length > 0 && (
+                <div className="p-4 border-t">
+                  <Select onValueChange={importFromList}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder={t("groceryLists.importFromOld")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {allLists.map((l) => (
+                        <SelectItem key={l.id} value={String(l.id)}>
+                          <Download className="h-3 w-3 inline mr-2" />
+                          {l.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </CardContent>
           </Card>
 
-          {list.items.length > 0 && (
+          {/* CTA to go to Products tab */}
+          {itemCount > 0 && (
             <Button
-              onClick={comparePrices}
+              variant="outline"
+              className="w-full gap-2"
+              onClick={() => {
+                setActiveTab("products");
+                if (!hasProductSuggestions) fetchProductSuggestions();
+              }}
+            >
+              <Package className="h-4 w-4" />
+              {language === "lt" ? "Rasti produktus →" : "Find Products →"}
+            </Button>
+          )}
+        </TabsContent>
+
+        {/* ─── Tab 2: Products ─── */}
+        <TabsContent value="products" className="space-y-4 mt-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              {language === "lt"
+                ? "Pasirinkite konkrečius produktus kiekvienai prekei prieš lyginant kainas."
+                : "Pick specific products for each item before comparing prices."}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={fetchProductSuggestions}
+              disabled={productSuggestionsLoading}
+              className="gap-1.5 shrink-0 ml-3"
+            >
+              {productSuggestionsLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Package className="h-3.5 w-3.5" />
+              )}
+              {hasProductSuggestions
+                ? (language === "lt" ? "Atnaujinti" : "Refresh")
+                : (language === "lt" ? "Ieškoti produktų" : "Find Products")}
+            </Button>
+          </div>
+
+          {!hasProductSuggestions && !productSuggestionsLoading && (
+            <Card>
+              <CardContent className="py-10 text-center">
+                <Package className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
+                <p className="text-muted-foreground text-sm">
+                  {language === "lt"
+                    ? "Spustelėkite 'Ieškoti produktų', kad rastumėte atitikmenų kiekvienai prekei."
+                    : "Click 'Find Products' to search for matches for each item."}
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
+          {productSuggestionsLoading && (
+            <Card>
+              <CardContent className="py-10 flex items-center justify-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <p className="text-muted-foreground text-sm">
+                  {language === "lt" ? "Ieškoma..." : "Searching..."}
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
+          {hasProductSuggestions && list.items.map((item) => {
+            const allCandidates = productSuggestions[item.itemName] || [];
+            const activeCategory = categoryFilters[item.itemName] ?? null;
+            // Distinct categories for disambiguation pills
+            const distinctCategories = [...new Set(
+              allCandidates.map((c) => c.canonicalCategory).filter(Boolean) as string[]
+            )];
+            const candidates = activeCategory
+              ? allCandidates.filter((c) => c.canonicalCategory === activeCategory)
+              : allCandidates;
+
+            return (
+              <Card key={item.itemName}>
+                <CardHeader className="pb-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium text-sm">{item.itemName}</span>
+                    {(item.quantity !== 1 || item.unit) && (
+                      <Badge variant="secondary" className="text-xs">
+                        ×{item.quantity}{item.unit ? ` ${item.unit}` : ""}
+                      </Badge>
+                    )}
+                    {allCandidates.length === 0 && (
+                      <Badge variant="outline" className="text-xs text-red-500">
+                        {language === "lt" ? "nerasta" : "not found"}
+                      </Badge>
+                    )}
+                    {/* Category disambiguation pills */}
+                    {distinctCategories.length > 1 && (
+                      <div className="flex gap-1 flex-wrap ml-1">
+                        <button
+                          onClick={() => setCategoryFilters((p) => ({ ...p, [item.itemName]: null }))}
+                          className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                            activeCategory === null
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "border-border text-muted-foreground hover:border-primary/50"
+                          }`}
+                        >
+                          {language === "lt" ? "Visi" : "All"}
+                        </button>
+                        {distinctCategories.map((cat) => (
+                          <button
+                            key={cat}
+                            onClick={() => setCategoryFilters((p) => ({ ...p, [item.itemName]: cat }))}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                              activeCategory === cat
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "border-border text-muted-foreground hover:border-primary/50"
+                            }`}
+                          >
+                            {cat}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </CardHeader>
+                {candidates.length > 0 && (
+                  <CardContent className="pt-0">
+                    <div className="flex gap-2 overflow-x-auto pb-1">
+                      {candidates.map((c) => (
+                        <div
+                          key={c.id}
+                          className="shrink-0 w-36 border rounded-lg p-2.5 cursor-pointer hover:border-primary hover:bg-accent/30 transition-colors relative"
+                          onClick={() => setPreviewProductId(c.id)}
+                        >
+                          {c.price != null && (
+                            <span className="text-xs font-bold text-primary">
+                              {c.price.toFixed(2)}€
+                            </span>
+                          )}
+                          <p className="text-xs font-medium leading-snug mt-1 line-clamp-2">{c.name}</p>
+                          {c.brand && (
+                            <p className="text-[10px] text-muted-foreground mt-0.5">{c.brand}</p>
+                          )}
+                          {c.weightValue && c.weightUnit && (
+                            <p className="text-[10px] text-muted-foreground">{c.weightValue}{c.weightUnit}</p>
+                          )}
+                          <Badge variant="outline" className="text-[10px] mt-1.5 truncate max-w-full">
+                            {c.store}
+                          </Badge>
+                          <button
+                            className="absolute top-1.5 right-1.5 text-muted-foreground hover:text-foreground"
+                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.id); }}
+                            title="Preview"
+                          >
+                            <Info className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                )}
+              </Card>
+            );
+          })}
+
+          {/* Find Best Prices CTA */}
+          {itemCount > 0 && (
+            <Button
+              onClick={handleFindPrices}
               disabled={comparing}
               className="w-full gap-2"
               size="lg"
             >
-              <Scale className="h-5 w-5" />
-              {comparing ? t("common.loading") : t("groceryLists.comparePrices")}
+              {comparing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Scale className="h-4 w-4" />
+              )}
+              {comparing
+                ? t("common.loading")
+                : (language === "lt" ? "Rasti geriausias kainas →" : "Find Best Prices →")}
             </Button>
           )}
-        </div>
+        </TabsContent>
 
-        {/* Comparison results */}
-        <div>
-          {compareResult && recalculatedResults && (
-            <div className="space-y-6">
-              {/* Section 1: Item Matching */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Package className="h-5 w-5" />
-                    {t("compare.itemMatching") || "Matched Products"}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {list.items.map((item) => {
-                    const isExpanded = expandedItems.has(item.itemName);
-                    // Collect all candidates across stores for this item
-                    const allStoreCandidates = recalculatedResults.map((sr) => {
-                      const storeItem = sr.items.find((i) => i.itemName === item.itemName);
-                      return { store: sr, storeItem };
-                    }).filter((x) => x.storeItem?.match);
+        {/* ─── Tab 3: Compare ─── */}
+        <TabsContent value="compare" className="space-y-4 mt-4">
+          {!compareResult ? (
+            <Card>
+              <CardContent className="py-10 text-center">
+                <Scale className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
+                <p className="text-muted-foreground text-sm mb-4">
+                  {language === "lt"
+                    ? "Dar nėra rezultatų. Eikite į skirtuką 'Produktai' ir ieškokite geriausių kainų."
+                    : "No results yet. Go to the Products tab and find the best prices."}
+                </p>
+                {itemCount > 0 && (
+                  <Button onClick={handleFindPrices} disabled={comparing} className="gap-2">
+                    {comparing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scale className="h-4 w-4" />}
+                    {comparing ? t("common.loading") : (language === "lt" ? "Palyginti kainas" : "Compare Prices")}
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {/* Re-run button */}
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">
+                  {language === "lt" ? "Palyginimo rezultatai" : "Comparison results"}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={comparePrices}
+                  disabled={comparing}
+                  className="gap-1.5"
+                >
+                  {comparing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Scale className="h-3.5 w-3.5" />
+                  )}
+                  {language === "lt" ? "Atnaujinti" : "Re-run"}
+                </Button>
+              </div>
 
-                    // Best match overall (cheapest line cost across stores)
-                    const bestOverall = allStoreCandidates.reduce<{
-                      store: typeof recalculatedResults[0];
-                      match: NonNullable<typeof allStoreCandidates[0]["storeItem"]>["match"];
-                      lineCost: number;
-                    } | null>((best, { store, storeItem }) => {
-                      if (!storeItem?.match) return best;
-                      const lc = computeLineCost(storeItem.match, item.quantity);
-                      if (!best || lc < best.lineCost) return { store, match: storeItem.match, lineCost: lc };
-                      return best;
-                    }, null);
+              {recalculatedResults && (
+                <div className="space-y-6">
+                  {/* Section 1: Item Matching */}
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <Package className="h-5 w-5" />
+                        {t("compare.itemMatching") || "Matched Products"}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {list.items.map((item) => {
+                        const isExpanded = expandedItems.has(item.itemName);
+                        const allStoreCandidates = recalculatedResults.map((sr) => {
+                          const storeItem = sr.items.find((i) => i.itemName === item.itemName);
+                          return { store: sr, storeItem };
+                        }).filter((x) => x.storeItem?.match);
 
-                    const foundCount = allStoreCandidates.length;
+                        const bestOverall = allStoreCandidates.reduce<{
+                          store: typeof recalculatedResults[0];
+                          match: NonNullable<typeof allStoreCandidates[0]["storeItem"]>["match"];
+                          lineCost: number;
+                        } | null>((best, { store, storeItem }) => {
+                          if (!storeItem?.match) return best;
+                          const lc = computeLineCost(storeItem.match, item.quantity);
+                          if (!best || lc < best.lineCost) return { store, match: storeItem.match, lineCost: lc };
+                          return best;
+                        }, null);
 
-                    return (
-                      <div key={item.itemName} className="border rounded-lg overflow-hidden">
-                        {/* Collapsed header */}
-                        <button
-                          onClick={() => toggleItemExpanded(item.itemName)}
-                          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-accent/50 transition-colors text-left"
-                        >
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium text-sm">{item.itemName}</span>
-                              {item.quantity !== 1 && (
-                                <Badge variant="secondary" className="text-xs">
-                                  ×{item.quantity}{item.unit ? ` ${item.unit}` : ""}
-                                </Badge>
-                              )}
-                            </div>
-                            {bestOverall?.match ? (
-                              <div className="flex items-center gap-2 mt-1">
-                                <span className="text-xs text-muted-foreground truncate">
-                                  {bestOverall.match.productName}
-                                  {bestOverall.match.brand && (
-                                    <span className="text-muted-foreground/70"> · {bestOverall.match.brand}</span>
-                                  )}
-                                  {bestOverall.match.weightValue && bestOverall.match.weightUnit && (
-                                    <span className="text-muted-foreground/70"> · {bestOverall.match.weightValue}{bestOverall.match.weightUnit}</span>
-                                  )}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="text-xs text-red-500 italic">{t("compare.notFound")}</span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {bestOverall && (
-                              <div className="text-right">
-                                <span className="text-sm font-semibold">{bestOverall.lineCost.toFixed(2)}€</span>
-                                <p className={`text-[10px] ${chainColor[bestOverall.store.storeChain] || "text-muted-foreground"}`}>
-                                  {bestOverall.store.storeName}
-                                  {bestOverall.match?.matchType === "pack" && " · pack"}
-                                  {bestOverall.match?.matchType === "unit" && item.quantity > 1 && ` · ${item.quantity}×`}
-                                </p>
-                              </div>
-                            )}
-                            <Badge variant="outline" className="text-[10px]">
-                              {foundCount}/{recalculatedResults.length}
-                            </Badge>
-                            {isExpanded ? (
-                              <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                            ) : (
-                              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                            )}
-                          </div>
-                        </button>
+                        const foundCount = allStoreCandidates.length;
+                        const isAutoMatching = autoMatchLoading.has(item.itemName);
 
-                        {/* Expanded: per-store candidates */}
-                        {isExpanded && (
-                          <div className="border-t bg-muted/30 px-4 py-3 space-y-3">
-                            {recalculatedResults.map((sr) => {
-                              const storeItem = sr.items.find((i) => i.itemName === item.itemName);
-                              if (!storeItem || storeItem.candidates.length === 0) {
-                                return (
-                                  <div key={sr.storeId} className="flex items-center justify-between text-sm opacity-50">
-                                    <span className={`font-medium ${chainColor[sr.storeChain] || ""}`}>{sr.storeName}</span>
-                                    <span className="text-xs italic">{t("compare.notFound")}</span>
-                                  </div>
-                                );
-                              }
-                              const selectedIdx = selectedCandidates[item.itemName]?.[sr.storeId] ?? 0;
-                              return (
-                                <div key={sr.storeId} className="space-y-1">
-                                  <p className={`text-xs font-semibold ${chainColor[sr.storeChain] || ""}`}>
-                                    {sr.storeName}
-                                  </p>
-                                  {storeItem.candidates.map((c, ci) => {
-                                    const effectivePrice = Math.min(
-                                      c.price,
-                                      c.salePrice ?? Infinity,
-                                      c.loyaltyPrice ?? Infinity
-                                    );
-                                    const lineCost = computeLineCost(c, item.quantity);
-                                    const isSelected = ci === selectedIdx;
-                                    const isPack = c.matchType === "pack";
-                                    return (
-                                      <button
-                                        key={c.productId}
-                                        onClick={() => selectCandidate(item.itemName, sr.storeId, ci)}
-                                        onDoubleClick={() => setPreviewProductId(c.productId)}
-                                        className={`w-full flex items-center gap-2 px-3 py-2 rounded text-left text-sm transition-colors ${
-                                          isSelected
-                                            ? "bg-primary/10 border border-primary/30"
-                                            : "hover:bg-accent/50 border border-transparent"
-                                        }`}
-                                      >
-                                        {c.imageUrl && (
-                                          <img
-                                            src={c.imageUrl}
-                                            alt=""
-                                            className="w-8 h-8 object-contain rounded shrink-0"
-                                          />
-                                        )}
-                                        <div className="flex-1 min-w-0">
-                                          <p className="text-sm truncate">{c.productName}</p>
-                                          <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                                            {c.brand && <span>{c.brand}</span>}
-                                            {c.brand && c.weightValue && <span>·</span>}
-                                            {c.weightValue && c.weightUnit && (
-                                              <span>{c.weightValue}{c.weightUnit}</span>
-                                            )}
-                                            {isPack && (
-                                              <Badge variant="secondary" className="text-[10px] py-0 px-1 ml-1">
-                                                {item.quantity}-pack
-                                              </Badge>
-                                            )}
-                                          </div>
-                                        </div>
-                                        <div className="text-right shrink-0">
-                                          <p className="font-semibold text-sm">{lineCost.toFixed(2)}€</p>
-                                          {!isPack && item.quantity > 1 && (
-                                            <p className="text-[10px] text-muted-foreground">
-                                              {item.quantity} × {effectivePrice.toFixed(2)}€
-                                            </p>
-                                          )}
-                                          {isPack && (
-                                            <p className="text-[10px] text-muted-foreground">
-                                              {(effectivePrice / item.quantity).toFixed(2)}€/ea
-                                            </p>
-                                          )}
-                                          {c.salePrice && c.salePrice < c.price && !isPack && item.quantity <= 1 && (
-                                            <p className="text-[10px] line-through text-muted-foreground">
-                                              {c.price.toFixed(2)}€
-                                            </p>
-                                          )}
-                                        </div>
-                                        <div className="flex flex-col items-center gap-1 shrink-0">
-                                          {isSelected && <Check className="h-4 w-4 text-primary" />}
-                                          <button
-                                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.productId); }}
-                                            className="text-muted-foreground hover:text-foreground"
-                                            title="Preview product"
-                                          >
-                                            <Info className="h-3.5 w-3.5" />
-                                          </button>
-                                        </div>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </CardContent>
-              </Card>
-
-              {/* Section 2: Store Recommendations */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <ShoppingCart className="h-5 w-5" />
-                    {t("compare.storeRecommendations") || "Store Recommendations"}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <Tabs defaultValue={compareResult.smartRecommendation ? "smart" : "single"}>
-                    <TabsList className="w-full">
-                      {compareResult.smartRecommendation && (
-                        <TabsTrigger value="smart" className="flex-1">
-                          <Navigation className="h-3 w-3 mr-1" />
-                          {t("compare.smartPick") || "Smart"}
-                        </TabsTrigger>
-                      )}
-                      <TabsTrigger value="single" className="flex-1">
-                        {t("compare.singleStore")}
-                      </TabsTrigger>
-                      <TabsTrigger value="split" className="flex-1">
-                        {t("compare.splitShopping")}
-                      </TabsTrigger>
-                    </TabsList>
-
-                    {/* Smart recommendation tab */}
-                    {compareResult.smartRecommendation && (
-                      <TabsContent value="smart" className="space-y-3 mt-4">
-                        <p className="text-xs text-muted-foreground">
-                          {t("compare.smartDescription") || "Factors in grocery cost, walking distance, and missing items to find the best overall store."}
-                        </p>
-                        {compareResult.smartRecommendation.map((rec, idx) => {
-                          const storeResult = recalculatedResults.find((s) => s.storeId === rec.storeId);
-                          return (
-                            <Card
-                              key={rec.storeId}
-                              className={idx === 0 ? "border-primary border-2" : ""}
+                        return (
+                          <div key={item.itemName} className="border rounded-lg overflow-hidden">
+                            <button
+                              onClick={() => toggleItemExpanded(item.itemName)}
+                              className="w-full flex items-center gap-3 px-4 py-3 hover:bg-accent/50 transition-colors text-left"
                             >
-                              <CardContent className="p-4">
-                                <div className="flex items-center justify-between mb-2">
-                                  <div className="flex items-center gap-2">
-                                    <span className={`font-bold ${chainColor[rec.storeChain] || ""}`}>
-                                      {rec.storeName}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-sm">{item.itemName}</span>
+                                  {item.quantity !== 1 && (
+                                    <Badge variant="secondary" className="text-xs">
+                                      ×{item.quantity}{item.unit ? ` ${item.unit}` : ""}
+                                    </Badge>
+                                  )}
+                                </div>
+                                {bestOverall?.match ? (
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="text-xs text-muted-foreground truncate">
+                                      {bestOverall.match.productName}
+                                      {bestOverall.match.brand && (
+                                        <span className="text-muted-foreground/70"> · {bestOverall.match.brand}</span>
+                                      )}
+                                      {bestOverall.match.weightValue && bestOverall.match.weightUnit && (
+                                        <span className="text-muted-foreground/70"> · {bestOverall.match.weightValue}{bestOverall.match.weightUnit}</span>
+                                      )}
                                     </span>
-                                    {idx === 0 && (
-                                      <Badge className="text-xs">
-                                        {t("compare.bestChoice") || "Best choice"} 🎯
-                                      </Badge>
-                                    )}
                                   </div>
+                                ) : (
+                                  <span className="text-xs text-red-500 italic">{t("compare.notFound")}</span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {bestOverall && (
                                   <div className="text-right">
-                                    <p className="text-lg font-bold">{rec.smartScore.toFixed(2)}€</p>
-                                    <p className="text-[10px] text-muted-foreground">effective cost</p>
-                                  </div>
-                                </div>
-                                <div className="grid grid-cols-3 gap-2 text-xs">
-                                  <div className="bg-muted/50 rounded p-2 text-center">
-                                    <p className="text-muted-foreground">Groceries</p>
-                                    <p className="font-semibold">{(storeResult?.totalCost ?? rec.totalCost).toFixed(2)}€</p>
-                                  </div>
-                                  <div className="bg-muted/50 rounded p-2 text-center">
-                                    <p className="text-muted-foreground flex items-center justify-center gap-0.5">
-                                      <MapPin className="h-3 w-3" />
-                                      Distance
+                                    <span className="text-sm font-semibold">{bestOverall.lineCost.toFixed(2)}€</span>
+                                    <p className={`text-[10px] ${chainColor[bestOverall.store.storeChain] || "text-muted-foreground"}`}>
+                                      {bestOverall.store.storeName}
+                                      {bestOverall.match?.matchType === "pack" && " · pack"}
+                                      {bestOverall.match?.matchType === "unit" && item.quantity > 1 && ` · ${item.quantity}×`}
                                     </p>
-                                    <p className="font-semibold">
-                                      {rec.distanceKm !== null ? `${rec.distanceKm.toFixed(1)} km` : "—"}
-                                    </p>
-                                    {rec.travelPenalty > 0 && (
-                                      <p className="text-[10px] text-orange-500">+{rec.travelPenalty.toFixed(2)}€</p>
-                                    )}
-                                  </div>
-                                  <div className="bg-muted/50 rounded p-2 text-center">
-                                    <p className="text-muted-foreground">Found</p>
-                                    <p className="font-semibold">
-                                      {storeResult?.matchedCount ?? rec.matchedCount}/{rec.totalItems}
-                                    </p>
-                                    {rec.missingPenalty > 0 && (
-                                      <p className="text-[10px] text-red-500">+{rec.missingPenalty.toFixed(2)}€</p>
-                                    )}
-                                  </div>
-                                </div>
-                                {/* Product breakdown */}
-                                {storeResult && (
-                                  <div className="mt-3 border-t pt-2 space-y-1">
-                                    {storeResult.items.map((item, i) => (
-                                      <div key={i} className="flex items-center justify-between text-xs gap-2">
-                                        <div className="flex-1 min-w-0">
-                                          <span className={item.match ? "" : "text-muted-foreground italic"}>
-                                            {item.match ? item.match.productName : item.itemName}
-                                          </span>
-                                          {item.match?.brand && (
-                                            <span className="text-muted-foreground ml-1">({item.match.brand})</span>
-                                          )}
-                                        </div>
-                                        <span className="font-medium shrink-0">
-                                          {item.match ? `${item.lineCost.toFixed(2)}€` : t("compare.notFound")}
-                                        </span>
-                                      </div>
-                                    ))}
                                   </div>
                                 )}
-                              </CardContent>
-                            </Card>
-                          );
-                        })}
-                      </TabsContent>
-                    )}
+                                {isAutoMatching && (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
+                                )}
+                                <Badge variant="outline" className="text-[10px]">
+                                  {foundCount}/{recalculatedResults.length}
+                                </Badge>
+                                {isExpanded ? (
+                                  <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                                ) : (
+                                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                                )}
+                              </div>
+                            </button>
 
-                    {/* Single store tab */}
-                    <TabsContent value="single" className="space-y-4 mt-4">
-                      {(() => {
-                        const sorted = [...recalculatedResults].sort((a, b) => {
-                          if (a.matchedCount !== b.matchedCount) return b.matchedCount - a.matchedCount;
-                          return a.totalCost - b.totalCost;
-                        });
-                        const maxCost = Math.max(...sorted.map(s => s.totalCost));
-                        return sorted.map((sr) => {
-                          const missingItems = sr.items.filter((i) => !i.match);
-                          const savings = sr.storeId !== sorted[sorted.length - 1]?.storeId
-                            ? maxCost - sr.totalCost
-                            : null;
-                          return (
-                            <Card
-                              key={sr.storeId}
-                              className={sr.storeId === cheapestRecalc?.storeId ? "border-primary border-2" : ""}
-                            >
+                            {isExpanded && (
+                              <div className="border-t bg-muted/30 px-4 py-3 space-y-3">
+                                {recalculatedResults.map((sr) => {
+                                  const storeItem = sr.items.find((i) => i.itemName === item.itemName);
+                                  if (!storeItem || storeItem.candidates.length === 0) {
+                                    return (
+                                      <div key={sr.storeId} className="flex items-center justify-between text-sm opacity-50">
+                                        <span className={`font-medium ${chainColor[sr.storeChain] || ""}`}>{sr.storeName}</span>
+                                        <span className="text-xs italic">{t("compare.notFound")}</span>
+                                      </div>
+                                    );
+                                  }
+                                  const selectedIdx = selectedCandidates[item.itemName]?.[sr.storeId] ?? 0;
+                                  return (
+                                    <div key={sr.storeId} className="space-y-1">
+                                      <p className={`text-xs font-semibold ${chainColor[sr.storeChain] || ""}`}>
+                                        {sr.storeName}
+                                      </p>
+                                      {storeItem.candidates.map((c, ci) => {
+                                        const effectivePrice = Math.min(
+                                          c.price,
+                                          c.salePrice ?? Infinity,
+                                          c.loyaltyPrice ?? Infinity
+                                        );
+                                        const lineCost = computeLineCost(c, item.quantity);
+                                        const isSelected = ci === selectedIdx;
+                                        const isPack = c.matchType === "pack";
+                                        return (
+                                          <button
+                                            key={c.productId}
+                                            onClick={() => selectAndAutoMatch(item.itemName, sr.storeId, ci)}
+                                            onDoubleClick={() => setPreviewProductId(c.productId)}
+                                            className={`w-full flex items-center gap-2 px-3 py-2 rounded text-left text-sm transition-colors ${
+                                              isSelected
+                                                ? "bg-primary/10 border border-primary/30"
+                                                : "hover:bg-accent/50 border border-transparent"
+                                            }`}
+                                          >
+                                            {c.imageUrl && (
+                                              <img
+                                                src={c.imageUrl}
+                                                alt=""
+                                                className="w-8 h-8 object-contain rounded shrink-0"
+                                              />
+                                            )}
+                                            <div className="flex-1 min-w-0">
+                                              <p className="text-sm truncate">{c.productName}</p>
+                                              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                                {c.brand && <span>{c.brand}</span>}
+                                                {c.brand && c.weightValue && <span>·</span>}
+                                                {c.weightValue && c.weightUnit && (
+                                                  <span>{c.weightValue}{c.weightUnit}</span>
+                                                )}
+                                                {isPack && (
+                                                  <Badge variant="secondary" className="text-[10px] py-0 px-1 ml-1">
+                                                    {item.quantity}-pack
+                                                  </Badge>
+                                                )}
+                                              </div>
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                              <p className="font-semibold text-sm">{lineCost.toFixed(2)}€</p>
+                                              {!isPack && item.quantity > 1 && (
+                                                <p className="text-[10px] text-muted-foreground">
+                                                  {item.quantity} × {effectivePrice.toFixed(2)}€
+                                                </p>
+                                              )}
+                                              {isPack && (
+                                                <p className="text-[10px] text-muted-foreground">
+                                                  {(effectivePrice / item.quantity).toFixed(2)}€/ea
+                                                </p>
+                                              )}
+                                              {c.salePrice && c.salePrice < c.price && !isPack && item.quantity <= 1 && (
+                                                <p className="text-[10px] line-through text-muted-foreground">
+                                                  {c.price.toFixed(2)}€
+                                                </p>
+                                              )}
+                                            </div>
+                                            <div className="flex flex-col items-center gap-1 shrink-0">
+                                              {isSelected && <Check className="h-4 w-4 text-primary" />}
+                                              <button
+                                                onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.productId); }}
+                                                className="text-muted-foreground hover:text-foreground"
+                                                title="Preview product"
+                                              >
+                                                <Info className="h-3.5 w-3.5" />
+                                              </button>
+                                            </div>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </CardContent>
+                  </Card>
+
+                  {/* Section 2: Store Recommendations */}
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        <ShoppingCart className="h-5 w-5" />
+                        {t("compare.storeRecommendations") || "Store Recommendations"}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <Tabs defaultValue={compareResult.smartRecommendation ? "smart" : "single"}>
+                        <TabsList className="w-full">
+                          {compareResult.smartRecommendation && (
+                            <TabsTrigger value="smart" className="flex-1">
+                              <Navigation className="h-3 w-3 mr-1" />
+                              {t("compare.smartPick") || "Smart"}
+                            </TabsTrigger>
+                          )}
+                          <TabsTrigger value="single" className="flex-1">
+                            {t("compare.singleStore")}
+                          </TabsTrigger>
+                          <TabsTrigger value="split" className="flex-1">
+                            {t("compare.splitShopping")}
+                          </TabsTrigger>
+                        </TabsList>
+
+                        {compareResult.smartRecommendation && (
+                          <TabsContent value="smart" className="space-y-3 mt-4">
+                            <p className="text-xs text-muted-foreground">
+                              {t("compare.smartDescription") || "Factors in grocery cost, walking distance, and missing items to find the best overall store."}
+                            </p>
+                            {compareResult.smartRecommendation.map((rec, idx) => {
+                              const storeResult = recalculatedResults.find((s) => s.storeId === rec.storeId);
+                              return (
+                                <Card
+                                  key={rec.storeId}
+                                  className={idx === 0 ? "border-primary border-2" : ""}
+                                >
+                                  <CardContent className="p-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <div className="flex items-center gap-2">
+                                        <span className={`font-bold ${chainColor[rec.storeChain] || ""}`}>
+                                          {rec.storeName}
+                                        </span>
+                                        {idx === 0 && (
+                                          <Badge className="text-xs">
+                                            {t("compare.bestChoice") || "Best choice"} 🎯
+                                          </Badge>
+                                        )}
+                                      </div>
+                                      <div className="text-right">
+                                        <p className="text-lg font-bold">{rec.smartScore.toFixed(2)}€</p>
+                                        <p className="text-[10px] text-muted-foreground">effective cost</p>
+                                      </div>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2 text-xs">
+                                      <div className="bg-muted/50 rounded p-2 text-center">
+                                        <p className="text-muted-foreground">Groceries</p>
+                                        <p className="font-semibold">{(storeResult?.totalCost ?? rec.totalCost).toFixed(2)}€</p>
+                                      </div>
+                                      <div className="bg-muted/50 rounded p-2 text-center">
+                                        <p className="text-muted-foreground flex items-center justify-center gap-0.5">
+                                          <MapPin className="h-3 w-3" />
+                                          Distance
+                                        </p>
+                                        <p className="font-semibold">
+                                          {rec.distanceKm !== null ? `${rec.distanceKm.toFixed(1)} km` : "—"}
+                                        </p>
+                                        {rec.travelPenalty > 0 && (
+                                          <p className="text-[10px] text-orange-500">+{rec.travelPenalty.toFixed(2)}€</p>
+                                        )}
+                                      </div>
+                                      <div className="bg-muted/50 rounded p-2 text-center">
+                                        <p className="text-muted-foreground">Found</p>
+                                        <p className="font-semibold">
+                                          {storeResult?.matchedCount ?? rec.matchedCount}/{rec.totalItems}
+                                        </p>
+                                        {rec.missingPenalty > 0 && (
+                                          <p className="text-[10px] text-red-500">+{rec.missingPenalty.toFixed(2)}€</p>
+                                        )}
+                                      </div>
+                                    </div>
+                                    {storeResult && (
+                                      <div className="mt-3 border-t pt-2 space-y-1">
+                                        {storeResult.items.map((item, i) => (
+                                          <div key={i} className="flex items-center justify-between text-xs gap-2">
+                                            <div className="flex-1 min-w-0">
+                                              <span className={item.match ? "" : "text-muted-foreground italic"}>
+                                                {item.match ? item.match.productName : item.itemName}
+                                              </span>
+                                              {item.match?.brand && (
+                                                <span className="text-muted-foreground ml-1">({item.match.brand})</span>
+                                              )}
+                                            </div>
+                                            <span className="font-medium shrink-0">
+                                              {item.match ? `${item.lineCost.toFixed(2)}€` : t("compare.notFound")}
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </CardContent>
+                                </Card>
+                              );
+                            })}
+                          </TabsContent>
+                        )}
+
+                        <TabsContent value="single" className="space-y-4 mt-4">
+                          {(() => {
+                            const sorted = [...recalculatedResults].sort((a, b) => {
+                              if (a.matchedCount !== b.matchedCount) return b.matchedCount - a.matchedCount;
+                              return a.totalCost - b.totalCost;
+                            });
+                            const maxCost = Math.max(...sorted.map(s => s.totalCost));
+                            return sorted.map((sr) => {
+                              const missingItems = sr.items.filter((i) => !i.match);
+                              const savings = sr.storeId !== sorted[sorted.length - 1]?.storeId
+                                ? maxCost - sr.totalCost
+                                : null;
+                              return (
+                                <Card
+                                  key={sr.storeId}
+                                  className={sr.storeId === cheapestRecalc?.storeId ? "border-primary border-2" : ""}
+                                >
+                                  <CardContent className="p-4">
+                                    <div className="flex items-center justify-between mb-3">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className={`font-bold ${chainColor[sr.storeChain] || ""}`}>
+                                          {sr.storeName}
+                                        </span>
+                                        {sr.storeId === cheapestRecalc?.storeId && (
+                                          <Badge className="text-xs">
+                                            {t("compare.cheapestStore")} 🏆
+                                          </Badge>
+                                        )}
+                                        {savings !== null && savings > 0.01 && sr.storeId !== cheapestRecalc?.storeId && (
+                                          <span className="text-xs text-green-600 dark:text-green-400 font-medium">
+                                            -{savings.toFixed(2)}€ {language === "lt" ? "sutaupote" : "savings"}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="text-right">
+                                        <p className="text-lg font-bold">{sr.totalCost.toFixed(2)}€</p>
+                                        <p className="text-xs text-muted-foreground">
+                                          {sr.matchedCount}/{list.items.length} {language === "lt" ? "rasta" : "found"}
+                                        </p>
+                                      </div>
+                                    </div>
+                                    <ul className="space-y-1.5">
+                                      {sr.items.map((item, i) => (
+                                        <li key={i} className="flex items-center gap-2 text-sm">
+                                          {item.match?.imageUrl && (
+                                            <img
+                                              src={item.match.imageUrl}
+                                              alt=""
+                                              className="w-6 h-6 object-contain rounded shrink-0"
+                                            />
+                                          )}
+                                          <div className="flex-1 min-w-0">
+                                            <span className={item.match ? "" : "text-muted-foreground italic line-through"}>
+                                              {item.match ? item.match.productName : item.itemName}
+                                            </span>
+                                            {item.match && (
+                                              <span className="text-xs text-muted-foreground ml-1">
+                                                {item.match.brand && `${item.match.brand}`}
+                                                {item.match.brand && item.match.weightValue && " · "}
+                                                {item.match.weightValue && item.match.weightUnit && `${item.match.weightValue}${item.match.weightUnit}`}
+                                              </span>
+                                            )}
+                                            {!item.match && (
+                                              <span className="ml-1 text-xs text-red-500">
+                                                {language === "lt" ? "nerasta" : "not available"}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <span className={`font-medium shrink-0 ${!item.match ? "text-muted-foreground" : ""}`}>
+                                            {item.match ? `${item.lineCost.toFixed(2)}€` : "—"}
+                                          </span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                    {missingItems.length > 0 && (
+                                      <div className="mt-2 pt-2 border-t">
+                                        <p className="text-xs text-red-500">
+                                          ⚠️ {missingItems.length} {language === "lt" ? "produktų nerasta:" : "items not available:"}{" "}
+                                          {missingItems.map(i => i.itemName).join(", ")}
+                                        </p>
+                                      </div>
+                                    )}
+                                  </CardContent>
+                                </Card>
+                              );
+                            });
+                          })()}
+                        </TabsContent>
+
+                        <TabsContent value="split" className="space-y-4 mt-4">
+                          {splitRecalc && (
+                            <Card className="border-primary border-2">
                               <CardContent className="p-4">
                                 <div className="flex items-center justify-between mb-3">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className={`font-bold ${chainColor[sr.storeChain] || ""}`}>
-                                      {sr.storeName}
-                                    </span>
-                                    {sr.storeId === cheapestRecalc?.storeId && (
-                                      <Badge className="text-xs">
-                                        {t("compare.cheapestStore")} 🏆
-                                      </Badge>
-                                    )}
-                                    {savings !== null && savings > 0.01 && sr.storeId !== cheapestRecalc?.storeId && (
-                                      <span className="text-xs text-green-600 dark:text-green-400 font-medium">
-                                        -{savings.toFixed(2)}€ {language === "lt" ? "sutaupote" : "savings"}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-right">
-                                    <p className="text-lg font-bold">{sr.totalCost.toFixed(2)}€</p>
-                                    <p className="text-xs text-muted-foreground">
-                                      {sr.matchedCount}/{list.items.length} {language === "lt" ? "rasta" : "found"}
-                                    </p>
-                                  </div>
+                                  <span className="font-bold">{t("compare.splitShopping")}</span>
+                                  <p className="text-lg font-bold">{splitRecalc.totalCost.toFixed(2)}€</p>
                                 </div>
-                                <ul className="space-y-1.5">
-                                  {sr.items.map((item, i) => (
-                                    <li key={i} className="flex items-center gap-2 text-sm">
-                                      {item.match?.imageUrl && (
-                                        <img
-                                          src={item.match.imageUrl}
-                                          alt=""
-                                          className="w-6 h-6 object-contain rounded shrink-0"
-                                        />
-                                      )}
+                                <ul className="space-y-2">
+                                  {splitRecalc.items.map((item, i) => (
+                                    <li key={i} className="flex items-center justify-between text-sm gap-2">
                                       <div className="flex-1 min-w-0">
-                                        <span className={item.match ? "" : "text-muted-foreground italic line-through"}>
+                                        <p className="truncate">
                                           {item.match ? item.match.productName : item.itemName}
-                                        </span>
+                                        </p>
                                         {item.match && (
-                                          <span className="text-xs text-muted-foreground ml-1">
+                                          <p className="text-xs text-muted-foreground truncate">
                                             {item.match.brand && `${item.match.brand}`}
                                             {item.match.brand && item.match.weightValue && " · "}
                                             {item.match.weightValue && item.match.weightUnit && `${item.match.weightValue}${item.match.weightUnit}`}
-                                          </span>
-                                        )}
-                                        {!item.match && (
-                                          <span className="ml-1 text-xs text-red-500">
-                                            {language === "lt" ? "nerasta" : "not available"}
-                                          </span>
+                                          </p>
                                         )}
                                       </div>
-                                      <span className={`font-medium shrink-0 ${!item.match ? "text-muted-foreground" : ""}`}>
-                                        {item.match ? `${item.lineCost.toFixed(2)}€` : "—"}
+                                      <Badge
+                                        variant="outline"
+                                        className={`text-xs shrink-0 ${chainColor[item.bestStoreChain] || ""}`}
+                                      >
+                                        {item.bestStoreName}
+                                      </Badge>
+                                      <span className="font-medium shrink-0">
+                                        {item.bestPrice > 0 ? `${item.bestPrice.toFixed(2)}€` : t("compare.notFound")}
                                       </span>
                                     </li>
                                   ))}
                                 </ul>
-                                {missingItems.length > 0 && (
-                                  <div className="mt-2 pt-2 border-t">
-                                    <p className="text-xs text-red-500">
-                                      ⚠️ {missingItems.length} {language === "lt" ? "produktų nerasta:" : "items not available:"}{" "}
-                                      {missingItems.map(i => i.itemName).join(", ")}
-                                    </p>
-                                  </div>
-                                )}
                               </CardContent>
                             </Card>
-                          );
-                        });
-                      })()}
-                    </TabsContent>
-
-                    {/* Split shopping tab */}
-                    <TabsContent value="split" className="space-y-4 mt-4">
-                      {splitRecalc && (
-                        <Card className="border-primary border-2">
-                          <CardContent className="p-4">
-                            <div className="flex items-center justify-between mb-3">
-                              <span className="font-bold">{t("compare.splitShopping")}</span>
-                              <p className="text-lg font-bold">{splitRecalc.totalCost.toFixed(2)}€</p>
-                            </div>
-                            <ul className="space-y-2">
-                              {splitRecalc.items.map((item, i) => (
-                                <li key={i} className="flex items-center justify-between text-sm gap-2">
-                                  <div className="flex-1 min-w-0">
-                                    <p className="truncate">
-                                      {item.match ? item.match.productName : item.itemName}
-                                    </p>
-                                    {item.match && (
-                                      <p className="text-xs text-muted-foreground truncate">
-                                        {item.match.brand && `${item.match.brand}`}
-                                        {item.match.brand && item.match.weightValue && " · "}
-                                        {item.match.weightValue && item.match.weightUnit && `${item.match.weightValue}${item.match.weightUnit}`}
-                                      </p>
-                                    )}
-                                  </div>
-                                  <Badge
-                                    variant="outline"
-                                    className={`text-xs shrink-0 ${chainColor[item.bestStoreChain] || ""}`}
-                                  >
-                                    {item.bestStoreName}
-                                  </Badge>
-                                  <span className="font-medium shrink-0">
-                                    {item.bestPrice > 0 ? `${item.bestPrice.toFixed(2)}€` : t("compare.notFound")}
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          </CardContent>
-                        </Card>
-                      )}
-                    </TabsContent>
-                  </Tabs>
-                </CardContent>
-              </Card>
-            </div>
+                          )}
+                        </TabsContent>
+                      </Tabs>
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
+            </>
           )}
-        </div>
-      </div>
+        </TabsContent>
+      </Tabs>
 
       {showBrandPicker && dominantCategory && (
         <BrandPickerModal
@@ -1264,6 +1741,7 @@ export default function GroceryListDetailPage() {
             if (!list) return;
             const items = [...list.items, { itemName: name, quantity: 1, unit: null, checked: false }];
             setList({ ...list, items });
+            setProductSuggestions({});
             await saveItems(items);
           }}
         />
