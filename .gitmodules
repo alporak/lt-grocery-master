@@ -1,0 +1,3 @@
+[submodule "packages/data"]
+	path = packages/data
+	url = https://github.com/alporak/lt-grocery-master-db.git
