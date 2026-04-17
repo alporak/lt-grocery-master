@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { X, ExternalLink, Plus, Loader2 } from "lucide-react";
+import { X, ExternalLink, Plus, Loader2, Bell, BellOff } from "lucide-react";
+import { isWatched, watchProduct, unwatchProduct } from "@/lib/watchedProducts";
+import { analyzePricePattern } from "@/lib/pricePattern";
 import {
   LineChart,
   Line,
@@ -62,7 +64,8 @@ interface ProductDetail {
 interface ProductPreviewModalProps {
   productId: number;
   onClose: () => void;
-  onAddToList?: (name: string) => void;
+  onAddToList?: (name: string, weightValue: number | null, weightUnit: string | null) => void;
+  addToListLabel?: string;
 }
 
 const CHAIN_COLORS: Record<string, string> = {
@@ -73,18 +76,12 @@ const CHAIN_COLORS: Record<string, string> = {
   PROMO: "bg-purple-100 text-purple-800",
 };
 
-const CHAIN_TEXT: Record<string, string> = {
-  IKI: "text-red-600",
-  MAXIMA: "text-orange-600",
-  BARBORA: "text-orange-600",
-  RIMI: "text-blue-600",
-  PROMO: "text-purple-600",
-};
 
-export function ProductPreviewModal({ productId, onClose, onAddToList }: ProductPreviewModalProps) {
+export function ProductPreviewModal({ productId, onClose, onAddToList, addToListLabel }: ProductPreviewModalProps) {
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [mounted, setMounted] = useState(false);
+  const [watching, setWatching] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -96,7 +93,7 @@ export function ProductPreviewModal({ productId, onClose, onAddToList }: Product
     setProduct(null);
     fetch(`/api/products/${productId}?days=90`)
       .then((r) => r.json())
-      .then((d) => { setProduct(d); setLoading(false); })
+      .then((d) => { setProduct(d); setLoading(false); setWatching(isWatched(d.id)); })
       .catch(() => setLoading(false));
   }, [productId]);
 
@@ -239,6 +236,33 @@ export function ProductPreviewModal({ productId, onClose, onAddToList }: Product
               </div>
             )}
 
+            {/* Buy timing recommendation */}
+            {product.priceRecords.length >= 3 && (() => {
+              const pattern = analyzePricePattern(product.priceRecords);
+              if (pattern.recommendation === "neutral" && !pattern.avgSaleCycleDays) return null;
+              const icon = pattern.recommendation === "buy_now" ? "🟢" : pattern.recommendation === "wait" ? "🟡" : "⚪";
+              const color = pattern.recommendation === "buy_now"
+                ? "bg-green-50 border-green-200 text-green-800 dark:bg-green-900/20 dark:border-green-700 dark:text-green-300"
+                : pattern.recommendation === "wait"
+                ? "bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-900/20 dark:border-amber-700 dark:text-amber-300"
+                : "bg-muted/40 border-border text-muted-foreground";
+              return (
+                <div className={`rounded-lg border px-3 py-2 text-xs flex items-start gap-2 ${color}`}>
+                  <span className="text-sm shrink-0 mt-0.5">{icon}</span>
+                  <div>
+                    <p className="font-semibold">{
+                      pattern.recommendation === "buy_now" ? "Good time to buy" :
+                      pattern.recommendation === "wait" ? "Consider waiting" : "Price insight"
+                    }</p>
+                    <p className="mt-0.5 opacity-90">{pattern.recommendationReason}</p>
+                    {pattern.avgSalePrice != null && pattern.avgSalePrice < (effectivePrice ?? Infinity) && (
+                      <p className="mt-0.5 opacity-80">Avg sale price: {pattern.avgSalePrice.toFixed(2)}€</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Price chart */}
             {chartData && chartData.length >= 2 && (
               <div>
@@ -312,12 +336,30 @@ export function ProductPreviewModal({ productId, onClose, onAddToList }: Product
             <Button
               className="flex-1 gap-2"
               onClick={() => {
-                onAddToList(product.nameLt);
+                onAddToList(product.nameLt, product.weightValue, product.weightUnit);
                 onClose();
               }}
             >
               <Plus className="h-4 w-4" />
-              Add to list
+              {addToListLabel ?? "Add to list"}
+            </Button>
+          )}
+          {product && effectivePrice != null && (
+            <Button
+              variant={watching ? "default" : "outline"}
+              size="icon"
+              title={watching ? "Unwatch — remove price alert" : "Watch — get notified of price drops"}
+              onClick={() => {
+                if (watching) {
+                  unwatchProduct(product.id);
+                  setWatching(false);
+                } else {
+                  watchProduct({ id: product.id, name: product.nameLt, store: product.store.name, price: effectivePrice });
+                  setWatching(true);
+                }
+              }}
+            >
+              {watching ? <BellOff className="h-4 w-4" /> : <Bell className="h-4 w-4" />}
             </Button>
           )}
           {product?.productUrl && (

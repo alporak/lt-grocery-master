@@ -17,7 +17,15 @@ import {
   XCircle,
   AlertCircle,
   Tag,
+  ChevronDown,
+  ChevronUp,
+  Bell,
+  TrendingDown,
+  Info,
 } from "lucide-react";
+import { getWatchedProducts, updateLastSeenPrice, unwatchProduct, type WatchedProduct } from "@/lib/watchedProducts";
+import { CATEGORY_LABELS } from "@/lib/categoryLabels";
+import { ProductPreviewModal } from "@/components/ProductPreviewModal";
 
 interface DashboardStats {
   totalProducts: number;
@@ -32,6 +40,8 @@ interface DealProduct {
   imageUrl: string | null;
   productUrl: string | null;
   store: { id: number; name: string; chain: string } | null;
+  canonicalCategory: string | null;
+  discountPct: number | null;
   latestPrice: {
     regularPrice: number;
     salePrice: number | null;
@@ -83,7 +93,7 @@ function savingsPercent(regular: number, sale: number): number {
   return Math.round(((regular - sale) / regular) * 100);
 }
 
-function DealCard({ product }: { product: DealProduct }) {
+function DealCard({ product, onPreview }: { product: DealProduct; onPreview: (id: number) => void }) {
   const price = product.latestPrice;
   const chain = product.store?.chain ?? "";
   const chainColor = CHAIN_COLORS[chain] ?? "bg-gray-100 text-gray-700";
@@ -93,66 +103,76 @@ function DealCard({ product }: { product: DealProduct }) {
       : null;
 
   return (
-    <Link href={`/products/${product.id}`}>
-      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full flex flex-col">
-        {product.imageUrl && (
-          <div className="relative w-full h-32 bg-muted rounded-t-lg overflow-hidden">
-            <Image
-              src={product.imageUrl}
-              alt={product.name ?? ""}
-              fill
-              className="object-contain p-2"
-              sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
-            />
-          </div>
-        )}
-        <CardContent className="p-3 flex flex-col flex-1">
-          <div className="flex items-start justify-between gap-1 mb-1">
-            <Badge className={`text-xs shrink-0 ${chainColor}`} variant="secondary">
-              {product.store?.name ?? chain}
-            </Badge>
-            {price?.campaignText && (
-              <Badge variant="destructive" className="text-xs shrink-0">
-                {price.campaignText}
-              </Badge>
-            )}
-          </div>
-          <p className="text-xs font-medium leading-snug mb-2 flex-1 line-clamp-2">
-            {product.name}
-          </p>
-          <div className="flex items-baseline gap-2 mt-auto">
-            {price?.salePrice != null ? (
-              <>
-                <span className="text-base font-bold text-primary">
-                  {price.salePrice.toFixed(2)}€
-                </span>
-                <span className="text-xs text-muted-foreground line-through">
-                  {price.regularPrice.toFixed(2)}€
-                </span>
-                {savings != null && savings > 0 && (
-                  <span className="text-xs font-medium text-green-600 dark:text-green-400">
-                    -{savings}%
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="text-base font-bold">
-                {price?.regularPrice.toFixed(2)}€
-              </span>
-            )}
-          </div>
-          {price?.unitPrice != null && price.unitLabel && (
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {price.unitPrice.toFixed(2)} {price.unitLabel}
-            </p>
+    <div className="relative group">
+      <Link href={`/products/${product.id}`}>
+        <Card className="hover:shadow-md transition-shadow cursor-pointer h-full flex flex-col">
+          {product.imageUrl && (
+            <div className="relative w-full h-32 bg-muted rounded-t-lg overflow-hidden">
+              <Image
+                src={product.imageUrl}
+                alt={product.name ?? ""}
+                fill
+                className="object-contain p-2"
+                sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
+              />
+            </div>
           )}
-        </CardContent>
-      </Card>
-    </Link>
+          <CardContent className="p-3 flex flex-col flex-1">
+            <div className="flex items-start justify-between gap-1 mb-1">
+              <Badge className={`text-xs shrink-0 ${chainColor}`} variant="secondary">
+                {product.store?.name ?? chain}
+              </Badge>
+              {price?.campaignText && (
+                <Badge variant="destructive" className="text-xs shrink-0">
+                  {price.campaignText}
+                </Badge>
+              )}
+            </div>
+            <p className="text-xs font-medium leading-snug mb-2 flex-1 line-clamp-2">
+              {product.name}
+            </p>
+            <div className="flex items-baseline gap-2 mt-auto">
+              {price?.salePrice != null ? (
+                <>
+                  <span className="text-base font-bold text-primary">
+                    {price.salePrice.toFixed(2)}€
+                  </span>
+                  <span className="text-xs text-muted-foreground line-through">
+                    {price.regularPrice.toFixed(2)}€
+                  </span>
+                  {savings != null && savings > 0 && (
+                    <span className="text-xs font-medium text-green-600 dark:text-green-400">
+                      -{savings}%
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-base font-bold">
+                  {price?.regularPrice.toFixed(2)}€
+                </span>
+              )}
+            </div>
+            {price?.unitPrice != null && price.unitLabel && (
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {price.unitPrice.toFixed(2)} {price.unitLabel}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </Link>
+      {/* Quick-view button overlay */}
+      <button
+        onClick={(e) => { e.preventDefault(); onPreview(product.id); }}
+        className="absolute top-1.5 right-1.5 bg-background/80 backdrop-blur-sm rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity shadow-sm border"
+        title="Quick view"
+      >
+        <Info className="h-3.5 w-3.5 text-muted-foreground" />
+      </button>
+    </div>
   );
 }
 
-function DealGrid({ deals }: { deals: DealProduct[] }) {
+function DealGrid({ deals, onPreview }: { deals: DealProduct[]; onPreview: (id: number) => void }) {
   if (deals.length === 0) {
     return (
       <Card>
@@ -165,7 +185,7 @@ function DealGrid({ deals }: { deals: DealProduct[] }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
       {deals.map((p) => (
-        <DealCard key={p.id} product={p} />
+        <DealCard key={p.id} product={p} onPreview={onPreview} />
       ))}
     </div>
   );
@@ -176,10 +196,21 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [deals, setDeals] = useState<DealProduct[]>([]);
   const [storeStatuses, setStoreStatuses] = useState<StoreStatus[]>([]);
+  const [minDiscount, setMinDiscount] = useState(0);
+  const [dealCategory, setDealCategory] = useState<string | null>(null);
+  const [showScrapeStatus, setShowScrapeStatus] = useState(false);
+  const [previewProductId, setPreviewProductId] = useState<number | null>(null);
+  const [watchedList, setWatchedList] = useState<WatchedProduct[]>([]);
+  const [watchedPrices, setWatchedPrices] = useState<Record<number, {
+    currentPrice: number | null; regularPrice: number | null; salePrice: number | null;
+    name: string; store: string; chain: string; imageUrl: string | null;
+    unitPrice: number | null; unitLabel: string | null;
+  }>>({});
 
   useEffect(() => {
     // Fetch deal products
-    fetch(`/api/deals?limit=64&lang=${language}`)
+    const dealsUrl = `/api/deals?limit=96&lang=${language}${minDiscount > 0 ? `&minDiscount=${minDiscount}` : ""}${dealCategory ? `&category=${dealCategory}` : ""}`;
+    fetch(dealsUrl)
       .then((r) => r.json())
       .then((data: { items: DealProduct[]; total: number }) => {
         setDeals(data.items);
@@ -242,161 +273,97 @@ export default function DashboardPage() {
     const statusInterval = setInterval(fetchStatus, 15000);
 
     return () => clearInterval(statusInterval);
+  }, [language, minDiscount, dealCategory]);
+
+  // Load watched products and fetch current prices
+  useEffect(() => {
+    const watched = getWatchedProducts();
+    setWatchedList(watched);
+    if (watched.length === 0) return;
+    const ids = watched.map((w) => w.id).join(",");
+    fetch(`/api/products/watched?ids=${ids}&lang=${language}`)
+      .then((r) => r.json())
+      .then((data: Array<{
+        id: number; name: string; store: string; chain: string; imageUrl: string | null;
+        currentPrice: number | null; regularPrice: number | null; salePrice: number | null;
+        unitPrice: number | null; unitLabel: string | null;
+      }>) => {
+        const map: typeof watchedPrices = {};
+        for (const p of data) {
+          map[p.id] = { currentPrice: p.currentPrice, regularPrice: p.regularPrice, salePrice: p.salePrice, name: p.name, store: p.store, chain: p.chain, imageUrl: p.imageUrl, unitPrice: p.unitPrice, unitLabel: p.unitLabel };
+        }
+        setWatchedPrices(map);
+      })
+      .catch(() => {});
   }, [language]);
 
   const chains = [...new Set(deals.map((d) => d.store?.chain).filter(Boolean))] as string[];
 
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-bold">{t("dashboard.title")}</h1>
-
-      {/* Stats cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">
-              {t("dashboard.totalProducts")}
-            </CardTitle>
-            <Package className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {stats?.totalProducts ?? "—"}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">
-              {t("dashboard.storesTracked")}
-            </CardTitle>
-            <Store className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {stats?.storesTracked ?? "—"}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">
-              {t("dashboard.activeList")}
-            </CardTitle>
-            <ShoppingBasket className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {stats?.activeListCount ?? "—"}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">
-              {t("dashboard.lastScraped")}
-            </CardTitle>
-            <Clock className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm font-bold">
-              {stats?.lastScraped
-                ? new Date(stats.lastScraped).toLocaleString()
-                : "—"}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Scrape Status */}
+      {/* Hero: Current Deals */}
       <div>
-        <h2 className="text-xl font-semibold mb-4">
-          {t("dashboard.scrapeStatus")}
-        </h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {storeStatuses.map((store) => {
-            const latest = store.recentLogs[0];
-            const isRunning = latest?.status === "running";
-            const isError = latest?.status === "error";
-            const isSuccess = latest?.status === "success";
-
-            return (
-              <Card
-                key={store.id}
-                className={isRunning ? "border-primary/50" : ""}
-              >
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">
-                    {store.name}
-                  </CardTitle>
-                  {isRunning && (
-                    <Loader2 className="h-4 w-4 text-primary animate-spin" />
-                  )}
-                  {isSuccess && (
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
-                  )}
-                  {isError && (
-                    <XCircle className="h-4 w-4 text-destructive" />
-                  )}
-                  {!latest && (
-                    <AlertCircle className="h-4 w-4 text-muted-foreground" />
-                  )}
-                </CardHeader>
-                <CardContent className="space-y-1">
-                  <div className="text-2xl font-bold">
-                    {store.productCount}
-                    <span className="text-sm font-normal text-muted-foreground ml-1">
-                      {t("dashboard.productsFound")}
-                    </span>
-                  </div>
-                  {latest && (
-                    <div className="text-xs text-muted-foreground">
-                      {isRunning ? (
-                        <span className="text-primary font-medium">
-                          {t("dashboard.statusRunning")}
-                        </span>
-                      ) : isError ? (
-                        <span
-                          className="text-destructive"
-                          title={latest.errorMessage || ""}
-                        >
-                          {t("dashboard.statusError")}:{" "}
-                          {latest.errorMessage?.substring(0, 60)}
-                        </span>
-                      ) : (
-                        <span>
-                          {t("dashboard.statusSuccess")} —{" "}
-                          {latest.productCount} {t("dashboard.productsFound")}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  <div className="text-xs text-muted-foreground">
-                    {store.lastScrapedAt
-                      ? timeAgo(new Date(store.lastScrapedAt))
-                      : t("dashboard.neverScraped")}
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Current Deals */}
-      <div>
-        <div className="flex items-center gap-2 mb-4">
-          <Tag className="h-5 w-5" />
-          <h2 className="text-xl font-semibold">{t("dashboard.currentDeals")}</h2>
+        <div className="flex items-center gap-2 mb-3">
+          <Tag className="h-5 w-5 text-primary" />
+          <h1 className="text-2xl font-bold">{t("dashboard.currentDeals")}</h1>
           {deals.length > 0 && (
             <Badge variant="secondary" className="ml-auto">
-              {deals.length} deals
+              {deals.length} {language === "lt" ? "pasiūlymų" : "deals"}
             </Badge>
           )}
         </div>
+
+        {/* Discount filter */}
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          <span className="text-xs text-muted-foreground">{language === "lt" ? "Min. nuolaida:" : "Min. discount:"}</span>
+          {([0, 10, 20, 30, 50] as const).map((pct) => (
+            <button
+              key={pct}
+              onClick={() => setMinDiscount(pct)}
+              className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                minDiscount === pct
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "border-border text-muted-foreground hover:border-primary/50"
+              }`}
+            >
+              {pct === 0 ? (language === "lt" ? "Visos" : "All") : `-${pct}%+`}
+            </button>
+          ))}
+        </div>
+
+        {/* Category filter — derived from current deals */}
+        {(() => {
+          const catCounts = new Map<string, number>();
+          for (const d of deals) {
+            if (d.canonicalCategory) catCounts.set(d.canonicalCategory, (catCounts.get(d.canonicalCategory) ?? 0) + 1);
+          }
+          const topCats = [...catCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([id]) => id);
+          if (topCats.length < 2) return null;
+          return (
+            <div className="flex items-center gap-1.5 flex-wrap mb-4">
+              <span className="text-xs text-muted-foreground shrink-0">{language === "lt" ? "Kategorija:" : "Category:"}</span>
+              <button
+                onClick={() => setDealCategory(null)}
+                className={`text-xs px-2 py-0.5 rounded border transition-colors ${dealCategory === null ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary/50"}`}
+              >
+                {language === "lt" ? "Visos" : "All"}
+              </button>
+              {topCats.map((cat) => {
+                const label = CATEGORY_LABELS[cat];
+                if (!label) return null;
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => setDealCategory(cat === dealCategory ? null : cat)}
+                    className={`text-xs px-2 py-0.5 rounded border transition-colors ${dealCategory === cat ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground hover:border-primary/50"}`}
+                  >
+                    {label.icon} {language === "lt" ? label.lt : label.en}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {deals.length === 0 ? (
           <Card>
@@ -408,7 +375,7 @@ export default function DashboardPage() {
           <Tabs defaultValue="all">
             <TabsList className="mb-4 flex-wrap h-auto gap-1">
               <TabsTrigger value="all">
-                All ({deals.length})
+                {language === "lt" ? "Visos" : "All"} ({deals.length})
               </TabsTrigger>
               {chains.map((chain) => {
                 const count = deals.filter((d) => d.store?.chain === chain).length;
@@ -421,17 +388,219 @@ export default function DashboardPage() {
             </TabsList>
 
             <TabsContent value="all">
-              <DealGrid deals={deals} />
+              <DealGrid deals={deals} onPreview={setPreviewProductId} />
             </TabsContent>
 
             {chains.map((chain) => (
               <TabsContent key={chain} value={chain}>
-                <DealGrid deals={deals.filter((d) => d.store?.chain === chain)} />
+                <DealGrid deals={deals.filter((d) => d.store?.chain === chain)} onPreview={setPreviewProductId} />
               </TabsContent>
             ))}
           </Tabs>
         )}
       </div>
+
+      {/* Watched Products */}
+      {watchedList.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Bell className="h-4 w-4 text-primary" />
+            <h2 className="text-base font-semibold">
+              {language === "lt" ? "Stebiami produktai" : "Watched Products"}
+            </h2>
+            <span className="text-xs text-muted-foreground ml-1">
+              {language === "lt" ? "— sekite kainų pokyčius" : "— track price changes"}
+            </span>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            {watchedList.map((w) => {
+              const live = watchedPrices[w.id];
+              const currentPrice = live?.currentPrice ?? null;
+              const dropped = currentPrice != null && currentPrice < w.lastSeenPrice;
+              const rose = currentPrice != null && currentPrice > w.lastSeenPrice;
+              const pctChange = currentPrice != null && w.lastSeenPrice > 0
+                ? Math.round(((currentPrice - w.lastSeenPrice) / w.lastSeenPrice) * 100)
+                : null;
+              const chainColor = CHAIN_COLORS[live?.chain ?? ""] ?? "bg-gray-100 text-gray-700";
+
+              return (
+                <div key={w.id} className={`shrink-0 w-44 border rounded-lg p-3 flex flex-col gap-1.5 ${dropped ? "border-green-400/60 bg-green-50/30 dark:bg-green-900/10" : ""}`}>
+                  {live?.imageUrl && (
+                    <img src={live.imageUrl} alt="" className="w-10 h-10 object-contain rounded mx-auto" />
+                  )}
+                  <p className="text-xs font-medium line-clamp-2 leading-tight">{live?.name ?? w.name}</p>
+                  <Badge className={`text-[10px] w-fit ${chainColor}`} variant="secondary">
+                    {live?.store ?? w.store}
+                  </Badge>
+                  <div className="flex items-baseline gap-1 mt-auto">
+                    {currentPrice != null ? (
+                      <>
+                        <span className={`text-sm font-bold ${dropped ? "text-green-600" : rose ? "text-red-500" : ""}`}>
+                          {currentPrice.toFixed(2)}€
+                        </span>
+                        {pctChange !== null && pctChange !== 0 && (
+                          <span className={`text-[10px] font-semibold ${dropped ? "text-green-600" : "text-red-500"}`}>
+                            {dropped ? <TrendingDown className="inline h-3 w-3" /> : "↑"}{Math.abs(pctChange)}%
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
+                  </div>
+                  {dropped && (
+                    <p className="text-[10px] text-muted-foreground">
+                      {language === "lt" ? "Buvo" : "Was"} {w.lastSeenPrice.toFixed(2)}€
+                    </p>
+                  )}
+                  {live?.unitPrice != null && live.unitLabel && (
+                    <p className="text-[10px] text-muted-foreground">{live.unitPrice.toFixed(2)}€/{live.unitLabel}</p>
+                  )}
+                  <div className="flex gap-1 mt-1">
+                    {dropped && currentPrice != null && (
+                      <button
+                        onClick={() => {
+                          updateLastSeenPrice(w.id, currentPrice);
+                          setWatchedList(getWatchedProducts());
+                        }}
+                        className="text-[10px] text-green-700 border border-green-400/50 rounded px-1.5 py-0.5 hover:bg-green-50 transition-colors"
+                      >
+                        {language === "lt" ? "Patvirtinti" : "Dismiss"}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        unwatchProduct(w.id);
+                        setWatchedList(getWatchedProducts());
+                      }}
+                      className="text-[10px] text-muted-foreground border rounded px-1.5 py-0.5 hover:bg-muted transition-colors ml-auto"
+                    >
+                      {language === "lt" ? "Pašalinti" : "Remove"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Stats strip */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <Package className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">{t("dashboard.totalProducts")}</p>
+              <p className="text-xl font-bold leading-none mt-0.5">{stats?.totalProducts ?? "—"}</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <Store className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">{t("dashboard.storesTracked")}</p>
+              <p className="text-xl font-bold leading-none mt-0.5">{stats?.storesTracked ?? "—"}</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <ShoppingBasket className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">{t("dashboard.activeList")}</p>
+              <p className="text-xl font-bold leading-none mt-0.5">{stats?.activeListCount ?? "—"}</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">{t("dashboard.lastScraped")}</p>
+              <p className="text-sm font-semibold leading-none mt-0.5">
+                {stats?.lastScraped ? timeAgo(new Date(stats.lastScraped)) : "—"}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Scrape Status — collapsible */}
+      <div>
+        <button
+          onClick={() => setShowScrapeStatus((p) => !p)}
+          className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {t("dashboard.scrapeStatus")}
+          {showScrapeStatus ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          {storeStatuses.some((s) => s.recentLogs[0]?.status === "running") && (
+            <Loader2 className="h-3.5 w-3.5 text-primary animate-spin ml-1" />
+          )}
+          {storeStatuses.some((s) => s.recentLogs[0]?.status === "error") && (
+            <XCircle className="h-3.5 w-3.5 text-destructive ml-1" />
+          )}
+        </button>
+        {showScrapeStatus && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-3">
+            {storeStatuses.map((store) => {
+              const latest = store.recentLogs[0];
+              const isRunning = latest?.status === "running";
+              const isError = latest?.status === "error";
+              const isSuccess = latest?.status === "success";
+
+              return (
+                <Card
+                  key={store.id}
+                  className={isRunning ? "border-primary/50" : ""}
+                >
+                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                    <CardTitle className="text-sm font-medium">
+                      {store.name}
+                    </CardTitle>
+                    {isRunning && <Loader2 className="h-4 w-4 text-primary animate-spin" />}
+                    {isSuccess && <CheckCircle2 className="h-4 w-4 text-green-500" />}
+                    {isError && <XCircle className="h-4 w-4 text-destructive" />}
+                    {!latest && <AlertCircle className="h-4 w-4 text-muted-foreground" />}
+                  </CardHeader>
+                  <CardContent className="space-y-1">
+                    <div className="text-2xl font-bold">
+                      {store.productCount}
+                      <span className="text-sm font-normal text-muted-foreground ml-1">
+                        {t("dashboard.productsFound")}
+                      </span>
+                    </div>
+                    {latest && (
+                      <div className="text-xs text-muted-foreground">
+                        {isRunning ? (
+                          <span className="text-primary font-medium">{t("dashboard.statusRunning")}</span>
+                        ) : isError ? (
+                          <span className="text-destructive" title={latest.errorMessage || ""}>
+                            {t("dashboard.statusError")}: {latest.errorMessage?.substring(0, 60)}
+                          </span>
+                        ) : (
+                          <span>{t("dashboard.statusSuccess")} — {latest.productCount} {t("dashboard.productsFound")}</span>
+                        )}
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground">
+                      {store.lastScrapedAt ? timeAgo(new Date(store.lastScrapedAt)) : t("dashboard.neverScraped")}
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {previewProductId && (
+        <ProductPreviewModal
+          productId={previewProductId}
+          onClose={() => setPreviewProductId(null)}
+        />
+      )}
     </div>
   );
 }

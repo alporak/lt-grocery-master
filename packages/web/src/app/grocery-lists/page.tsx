@@ -7,7 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useI18n } from "@/components/i18n-provider";
-import { Plus, Copy, Trash2, ShoppingBasket, Loader2 } from "lucide-react";
+import { Plus, Copy, Trash2, ShoppingBasket, Loader2, Sparkles, ChevronDown, ChevronUp } from "lucide-react";
+import { STARTER_PACKS } from "@/lib/starterPacks";
 
 interface GroceryList {
   id: number;
@@ -25,10 +26,12 @@ interface GroceryList {
 }
 
 export default function GroceryListsPage() {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const router = useRouter();
   const [lists, setLists] = useState<GroceryList[]>([]);
   const [creating, setCreating] = useState(false);
+  const [cloningPackId, setCloningPackId] = useState<string | null>(null);
+  const [showPacks, setShowPacks] = useState(false);
 
   const fetchLists = () => {
     fetch("/api/grocery-lists")
@@ -77,6 +80,24 @@ export default function GroceryListsPage() {
     fetchLists();
   };
 
+  const cloneStarterPack = async (pack: typeof STARTER_PACKS[0]) => {
+    setCloningPackId(pack.id);
+    const created = await fetch("/api/grocery-lists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: language === "lt" ? pack.nameLt : pack.nameEn,
+        items: pack.items.map((i) => ({
+          itemName: i.itemName,
+          quantity: i.quantity,
+          unit: i.unit ?? null,
+        })),
+      }),
+    }).then((r) => r.json());
+    setCloningPackId(null);
+    if (created?.id) router.push(`/grocery-lists/${created.id}`);
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -89,6 +110,48 @@ export default function GroceryListsPage() {
           )}
           {t("groceryLists.newList")}
         </Button>
+      </div>
+
+      {/* Starter Packs */}
+      <div>
+        <button
+          onClick={() => setShowPacks((p) => !p)}
+          className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors mb-3"
+        >
+          <Sparkles className="h-4 w-4 text-primary" />
+          {language === "lt" ? "Pradžios rinkiniai" : "Starter Packs"}
+          <span className="text-xs text-muted-foreground">
+            {language === "lt" ? "— greitai pradėkite" : "— get started quickly"}
+          </span>
+          {showPacks ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
+        </button>
+        {showPacks && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {STARTER_PACKS.map((pack) => (
+              <button
+                key={pack.id}
+                onClick={() => cloneStarterPack(pack)}
+                disabled={cloningPackId === pack.id}
+                className="flex flex-col items-center gap-1.5 p-3 border rounded-lg hover:border-primary hover:bg-accent/30 transition-colors text-center disabled:opacity-60"
+              >
+                {cloningPackId === pack.id ? (
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                ) : (
+                  <span className="text-3xl">{pack.emoji}</span>
+                )}
+                <p className="text-xs font-semibold leading-tight">
+                  {language === "lt" ? pack.nameLt : pack.nameEn}
+                </p>
+                <p className="text-[10px] text-muted-foreground leading-tight">
+                  {language === "lt" ? pack.descLt : pack.descEn}
+                </p>
+                <Badge variant="outline" className="text-[10px] mt-0.5">
+                  {pack.items.length} {language === "lt" ? "prekės" : "items"}
+                </Badge>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Lists */}

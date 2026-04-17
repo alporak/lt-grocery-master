@@ -8,6 +8,8 @@ export async function GET(req: NextRequest) {
   const chain = searchParams.get("chain");
   const limit = Math.min(parseInt(searchParams.get("limit") || "64", 10), 200);
   const lang = searchParams.get("lang") || "lt";
+  const minDiscount = Math.max(0, Math.min(100, parseInt(searchParams.get("minDiscount") || "0", 10)));
+  const category = searchParams.get("category") || null;
 
   const stores = await prisma.store.findMany({
     where: {
@@ -27,6 +29,7 @@ export async function GET(req: NextRequest) {
   const products = await prisma.product.findMany({
     where: {
       storeId: { in: storeIds },
+      ...(category ? { canonicalCategory: category } : {}),
       priceRecords: {
         some: {
           OR: [
@@ -43,33 +46,55 @@ export async function GET(req: NextRequest) {
       },
     },
     orderBy: { updatedAt: "desc" },
-    take: limit * 2, // overfetch, then filter
+    take: limit * 4, // overfetch to allow discount % sorting
   });
 
-  // Keep only products whose latest price record has a deal
-  const items = products
-    .filter(
-      (p) =>
-        p.priceRecords[0]?.salePrice != null ||
-        p.priceRecords[0]?.campaignText != null
-    )
-    .slice(0, limit)
-    .map((p) => ({
-      id: p.id,
-      name: lang === "en" ? p.nameEn || p.nameLt : p.nameLt,
-      imageUrl: p.imageUrl,
-      productUrl: p.productUrl,
-      store: storeMap.get(p.storeId) ?? null,
-      latestPrice: p.priceRecords[0]
-        ? {
-            regularPrice: p.priceRecords[0].regularPrice,
-            salePrice: p.priceRecords[0].salePrice,
-            campaignText: p.priceRecords[0].campaignText,
-            unitPrice: p.priceRecords[0].unitPrice,
-            unitLabel: p.priceRecords[0].unitLabel,
-          }
-        : null,
-    }));
+  // Keep only products whose latest price record has a deal, apply minDiscount filter
+  const withDiscount = products
+    .filter((p) => {
+      const pr = p.priceRecords[0];
+      if (!pr) return false;
+      if (pr.salePrice == null && pr.campaignText == null) return false;
+      if (minDiscount > 0 && pr.salePrice != null) {
+        const pct = Math.round(((pr.regularPrice - pr.salePrice) / pr.regularPrice) * 100);
+        if (pct < minDiscount) return false;
+      }
+      return true;
+    });
+
+  // Sort by discount % descending (best deals first)
+  withDiscount.sort((a, b) => {
+    const prA = a.priceRecords[0];
+    const prB = b.priceRecords[0];
+    const pctA = prA?.salePrice != null
+      ? (prA.regularPrice - prA.salePrice) / prA.regularPrice
+      : 0;
+    const pctB = prB?.salePrice != null
+      ? (prB.regularPrice - prB.salePrice) / prB.regularPrice
+      : 0;
+    return pctB - pctA;
+  });
+
+  const items = withDiscount.slice(0, limit).map((p) => ({
+    id: p.id,
+    name: lang === "en" ? p.nameEn || p.nameLt : p.nameLt,
+    imageUrl: p.imageUrl,
+    productUrl: p.productUrl,
+    store: storeMap.get(p.storeId) ?? null,
+    canonicalCategory: p.canonicalCategory,
+    discountPct: p.priceRecords[0]?.salePrice != null
+      ? Math.round(((p.priceRecords[0].regularPrice - p.priceRecords[0].salePrice) / p.priceRecords[0].regularPrice) * 100)
+      : null,
+    latestPrice: p.priceRecords[0]
+      ? {
+          regularPrice: p.priceRecords[0].regularPrice,
+          salePrice: p.priceRecords[0].salePrice,
+          campaignText: p.priceRecords[0].campaignText,
+          unitPrice: p.priceRecords[0].unitPrice,
+          unitLabel: p.priceRecords[0].unitLabel,
+        }
+      : null,
+  }));
 
   return NextResponse.json({ items, total: items.length });
 }

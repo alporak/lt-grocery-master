@@ -11,6 +11,9 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const items = body.items;
   const language = body.language || "lt";
+  const travelCostPerKm: number = typeof body.travelCostPerKm === "number"
+    ? Math.max(0, Math.min(body.travelCostPerKm, 5))
+    : 0.3;
 
   if (!Array.isArray(items) || items.length === 0) {
     return NextResponse.json(
@@ -40,6 +43,6 @@ export async function POST(req: NextRequest) {
     }
   } catch { /* settings or geocode failure, continue without location */ }
 
-  const result = await compareGroceryList(items, language, userLat, userLng);
+  const result = await compareGroceryList(items, language, userLat, userLng, travelCostPerKm);
   return NextResponse.json(result);
 }

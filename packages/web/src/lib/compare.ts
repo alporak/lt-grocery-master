@@ -18,6 +18,7 @@ interface StoreMatch {
   productName: string;
   price: number;
   unitPrice?: number;
+  unitLabel?: string;
   salePrice?: number;
   loyaltyPrice?: number;
   brand?: string;
@@ -85,7 +86,8 @@ export async function compareGroceryList(
   items: CompareItem[],
   language: string = "lt",
   userLat?: number,
-  userLng?: number
+  userLng?: number,
+  travelCostPerKm: number = 0.3,
 ): Promise<CompareResult> {
   const stores = await prisma.store.findMany({ where: { enabled: true } });
 
@@ -183,10 +185,8 @@ export async function compareGroceryList(
       select: { storeId: true, lat: true, lng: true },
     });
 
-    // Travel cost per km walked (time + effort equivalent in €)
-    const TRAVEL_COST_PER_KM = 1.0;
-    // Penalty multiplier for each missing item (need another trip)
-    const MISSING_PENALTY_MULT = 3.0;
+    // Penalty multiplier for each missing item (estimated cost of a separate trip)
+    const MISSING_PENALTY_MULT = 2.0;
     // Average item cost estimate for missing penalty
     const avgItemCost =
       storeResults.reduce((s, r) => s + r.totalCost, 0) /
@@ -206,16 +206,13 @@ export async function compareGroceryList(
         distanceKm = Math.round(distanceKm * 100) / 100;
       }
 
-      const travelPenalty = distanceKm !== null ? distanceKm * TRAVEL_COST_PER_KM : 0;
+      // Simple linear travel cost: travelCostPerKm × round-trip distance (×2)
+      const adjustedTravelPenalty = distanceKm !== null ? distanceKm * 2 * travelCostPerKm : 0;
       const missingItems = items.length - sr.matchedCount;
       const missingPenalty = missingItems * avgItemCost * MISSING_PENALTY_MULT;
 
-      // Dynamic distance weight: for cheap lists, distance matters more
-      // For expensive lists (>€30), distance impact is proportionally smaller
-      const listValueFactor = Math.max(1, 10 / Math.max(sr.totalCost, 1));
-      const adjustedTravelPenalty = travelPenalty * Math.min(listValueFactor, 3);
-
       const smartScore = sr.totalCost + adjustedTravelPenalty + missingPenalty;
+      const travelPenalty = adjustedTravelPenalty;
 
       return {
         storeId: sr.storeId,
@@ -269,6 +266,7 @@ async function findCandidates(
     productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
     price: pr.regularPrice,
     unitPrice: pr.unitPrice ?? undefined,
+    unitLabel: pr.unitLabel ?? undefined,
     salePrice: pr.salePrice ?? undefined,
     loyaltyPrice: pr.loyaltyPrice ?? undefined,
     brand: product.brand ?? undefined,
@@ -363,6 +361,7 @@ async function _searchByName(
     productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
     price: pr.regularPrice,
     unitPrice: pr.unitPrice ?? undefined,
+    unitLabel: pr.unitLabel ?? undefined,
     salePrice: pr.salePrice ?? undefined,
     loyaltyPrice: pr.loyaltyPrice ?? undefined,
     brand: product.brand ?? undefined,
@@ -535,6 +534,7 @@ export async function findSimilarByProduct(
     productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
     price: pr.regularPrice,
     unitPrice: pr.unitPrice ?? undefined,
+    unitLabel: pr.unitLabel ?? undefined,
     salePrice: pr.salePrice ?? undefined,
     loyaltyPrice: pr.loyaltyPrice ?? undefined,
     brand: product.brand ?? undefined,

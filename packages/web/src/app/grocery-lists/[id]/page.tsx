@@ -33,12 +33,14 @@ import {
   Pencil,
   ClipboardList,
   Loader2,
+  CreditCard,
 } from "lucide-react";
 import { parseItem, formatParsed, splitIngredientLine } from "@/lib/parse-item";
 import { computeLineCost } from "@/lib/cost";
 import { BrandPickerModal } from "@/components/BrandPickerModal";
 import { ProductPreviewModal } from "@/components/ProductPreviewModal";
-import { getPreferredBrand } from "@/lib/brandPreferences";
+import { getPreferredBrand, getBrandPreferences } from "@/lib/brandPreferences";
+import { matchesDietaryFilter, type DietaryFilter } from "@/lib/dietaryTags";
 
 interface Suggestion {
   id: number;
@@ -46,6 +48,7 @@ interface Suggestion {
   nameEn: string | null;
   brand: string | null;
   canonicalCategory: string | null;
+  subcategory: string | null;
   store: string;
   chain: string;
   price: number | null;
@@ -82,6 +85,7 @@ interface StoreCompareResult {
       salePrice?: number;
       loyaltyPrice?: number;
       unitPrice?: number;
+      unitLabel?: string;
       brand?: string;
       weightValue?: number;
       weightUnit?: string;
@@ -99,6 +103,7 @@ interface StoreCompareResult {
       salePrice?: number;
       loyaltyPrice?: number;
       unitPrice?: number;
+      unitLabel?: string;
       brand?: string;
       weightValue?: number;
       weightUnit?: string;
@@ -188,17 +193,24 @@ export default function GroceryListDetailPage() {
   const [productSuggestionsLoading, setProductSuggestionsLoading] = useState(false);
   const [categoryFilters, setCategoryFilters] = useState<Record<string, string | null>>({});
 
+  // Dietary filter for Products tab
+  const [dietaryFilter, setDietaryFilter] = useState<DietaryFilter | null>(null);
+
   // Auto-match loading indicator (by itemName)
   const [autoMatchLoading, setAutoMatchLoading] = useState<Set<string>>(new Set());
 
   // Price comparison
   const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
   const [comparing, setComparing] = useState(false);
+  // Travel mode: €/km for distance penalty. 0 = ignore distance.
+  const [travelCostPerKm, setTravelCostPerKm] = useState<number>(0.3);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, Record<number, number>>>({});
 
   // Modals
   const [previewProductId, setPreviewProductId] = useState<number | null>(null);
+  // When non-null, opening preview from Products tab for this item — "Add to list" updates that item
+  const [previewSourceItemName, setPreviewSourceItemName] = useState<string | null>(null);
 
   const suggestRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -471,6 +483,7 @@ export default function GroceryListDetailPage() {
             unit: i.unit || undefined,
           })),
           language,
+          travelCostPerKm,
         }),
       }).then((r) => r.json());
       setCompareResult(result);
@@ -483,6 +496,39 @@ export default function GroceryListDetailPage() {
   const handleFindPrices = async () => {
     await comparePrices();
     setActiveTab("compare");
+  };
+
+  const exportList = () => {
+    if (!list) return;
+    const lines: string[] = [`${list.name}`, `Exported: ${new Date().toLocaleDateString()}`, ""];
+    lines.push("ITEMS:");
+    for (const item of list.items) {
+      lines.push(`  ×${item.quantity}${item.unit ? " " + item.unit : ""}  ${item.itemName}`);
+    }
+    if (compareResult) {
+      const smartRec = compareResult.smartRecommendation?.[0];
+      const best = smartRec
+        ? compareResult.storeResults.find((s) => s.storeId === smartRec.storeId)
+        : compareResult.storeResults.find((s) => s.storeId === compareResult.cheapestStoreId);
+      if (best) {
+        lines.push("");
+        lines.push(`RECOMMENDED STORE: ${best.storeName} — ${best.totalCost.toFixed(2)}€`);
+        for (const item of best.items) {
+          if (item.match) {
+            lines.push(`  ${item.itemName}: ${item.match.productName} — ${item.lineCost.toFixed(2)}€`);
+          } else {
+            lines.push(`  ${item.itemName}: NOT FOUND`);
+          }
+        }
+      }
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${list.name.replace(/[^a-z0-9]/gi, "_")}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const importFromList = async (sourceId: string) => {
@@ -498,13 +544,26 @@ export default function GroceryListDetailPage() {
   const fetchProductSuggestions = async () => {
     if (!list) return;
     setProductSuggestionsLoading(true);
+    const brandPrefs = getBrandPreferences();
     const results: Record<string, Suggestion[]> = {};
     await Promise.all(
       list.items.map(async (item) => {
+        // nodedupe=1 so all stores' copies of the same product are returned,
+        // letting the user pick which store to buy from.
         const res = await fetch(
-          `/api/products/suggest?q=${encodeURIComponent(item.itemName)}&limit=6`
+          `/api/products/suggest?q=${encodeURIComponent(item.itemName)}&limit=12&nodedupe=1`
         ).then((r) => r.json());
-        results[item.itemName] = Array.isArray(res) ? res : (res.suggestions || []);
+        let suggestions: Suggestion[] = Array.isArray(res) ? res : (res.suggestions || []);
+        // Boost preferred brand to top — sort preferred first, then by original order
+        const dominantCat = Array.isArray(res) ? null : (res.dominantCategory ?? null);
+        const preferred = dominantCat ? (brandPrefs[dominantCat] ?? null) : null;
+        if (preferred) {
+          suggestions = [
+            ...suggestions.filter((s) => s.brand === preferred),
+            ...suggestions.filter((s) => s.brand !== preferred),
+          ];
+        }
+        results[item.itemName] = suggestions;
       })
     );
     setProductSuggestions(results);
@@ -653,6 +712,23 @@ export default function GroceryListDetailPage() {
     );
   }
 
+  // How many packs of a product cover the requested quantity.
+  // e.g. 6 eggs / 10-pack = 1; 200g butter / 125g pack = 2
+  const calcPacksNeeded = (itemQty: number, itemUnit: string | null, packValue: number | null, packUnit: string | null): number => {
+    if (!packValue || packValue <= 0) return 1;
+    const iu = itemUnit?.toLowerCase() ?? null;
+    const pu = packUnit?.toLowerCase() ?? null;
+    const toGrams = (v: number, u: string) => u === "kg" ? v * 1000 : v;
+    const toMl = (v: number, u: string) => u === "l" ? v * 1000 : v;
+    if (iu && pu && ["g", "kg"].includes(iu) && ["g", "kg"].includes(pu))
+      return Math.max(1, Math.ceil(toGrams(itemQty, iu) / toGrams(packValue, pu)));
+    if (iu && pu && ["l", "ml"].includes(iu) && ["l", "ml"].includes(pu))
+      return Math.max(1, Math.ceil(toMl(itemQty, iu) / toMl(packValue, pu)));
+    if (!iu && pu && ["vnt", "vnt.", "pcs", "pc", "vn"].includes(pu))
+      return Math.max(1, Math.ceil(itemQty / packValue));
+    return 1;
+  };
+
   const chainColor: Record<string, string> = {
     IKI: "text-red-600",
     MAXIMA: "text-orange-600",
@@ -698,6 +774,15 @@ export default function GroceryListDetailPage() {
             {t("common.save")}…
           </Badge>
         )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="ml-auto shrink-0"
+          onClick={exportList}
+          title={language === "lt" ? "Eksportuoti sąrašą" : "Export list"}
+        >
+          <Download className="h-4 w-4" />
+        </Button>
       </div>
 
       {/* 3-tab layout */}
@@ -841,9 +926,12 @@ export default function GroceryListDetailPage() {
                               </p>
                             </div>
                             {s.price != null && (
-                              <span className="text-xs font-semibold shrink-0 text-primary">
-                                {s.price.toFixed(2)}€
-                              </span>
+                              <div className="text-right shrink-0">
+                                <span className="text-xs font-semibold text-primary">{s.price.toFixed(2)}€</span>
+                                {s.unitPrice != null && s.unitLabel && (
+                                  <p className="text-[10px] text-muted-foreground">{s.unitPrice.toFixed(2)}€/{s.unitLabel}</p>
+                                )}
+                              </div>
                             )}
                           </button>
                           <button
@@ -1102,6 +1190,34 @@ export default function GroceryListDetailPage() {
             </Button>
           </div>
 
+          {/* Dietary filters */}
+          {hasProductSuggestions && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs text-muted-foreground shrink-0">
+                {language === "lt" ? "Dieta:" : "Diet:"}
+              </span>
+              {([
+                { id: null, label: language === "lt" ? "Visi" : "All" },
+                { id: "vegan" as DietaryFilter, label: language === "lt" ? "Veganiška" : "Vegan" },
+                { id: "vegetarian" as DietaryFilter, label: language === "lt" ? "Vegetariška" : "Vegetarian" },
+                { id: "gluten-free" as DietaryFilter, label: language === "lt" ? "Be gliuteno" : "Gluten-free" },
+                { id: "lactose-free" as DietaryFilter, label: language === "lt" ? "Be laktozės" : "Lactose-free" },
+              ]).map((f) => (
+                <button
+                  key={String(f.id)}
+                  onClick={() => setDietaryFilter(f.id)}
+                  className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                    dietaryFilter === f.id
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border text-muted-foreground hover:border-primary/50"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           {!hasProductSuggestions && !productSuggestionsLoading && (
             <Card>
               <CardContent className="py-10 text-center">
@@ -1133,9 +1249,16 @@ export default function GroceryListDetailPage() {
             const distinctCategories = [...new Set(
               allCandidates.map((c) => c.canonicalCategory).filter(Boolean) as string[]
             )];
-            const candidates = activeCategory
-              ? allCandidates.filter((c) => c.canonicalCategory === activeCategory)
-              : allCandidates;
+            const candidates = allCandidates
+              .filter((c) => !activeCategory || c.canonicalCategory === activeCategory)
+              .filter((c) => !dietaryFilter || matchesDietaryFilter(dietaryFilter, {
+                name: c.name, nameEn: c.nameEn,
+                canonicalCategory: c.canonicalCategory, subcategory: c.subcategory,
+              }));
+            // Preferred brand for this item's category
+            const itemPreferredBrand = allCandidates[0]?.canonicalCategory
+              ? getPreferredBrand(allCandidates[0].canonicalCategory)
+              : null;
 
             return (
               <Card key={item.itemName}>
@@ -1184,17 +1307,27 @@ export default function GroceryListDetailPage() {
                 </CardHeader>
                 {candidates.length > 0 && (
                   <CardContent className="pt-0">
-                    <div className="flex gap-2 overflow-x-auto pb-1">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       {candidates.map((c) => (
                         <div
                           key={c.id}
-                          className="shrink-0 w-36 border rounded-lg p-2.5 cursor-pointer hover:border-primary hover:bg-accent/30 transition-colors relative"
-                          onClick={() => setPreviewProductId(c.id)}
+                          className={`border rounded-lg p-2.5 cursor-pointer hover:border-primary hover:bg-accent/30 transition-colors relative ${
+                            itemPreferredBrand && c.brand === itemPreferredBrand
+                              ? "border-amber-400/60 bg-amber-50/30 dark:bg-amber-900/10"
+                              : ""
+                          }`}
+                          onClick={() => { setPreviewProductId(c.id); setPreviewSourceItemName(item.itemName); }}
                         >
+                          {itemPreferredBrand && c.brand === itemPreferredBrand && (
+                            <span className="absolute top-1.5 left-1.5 text-[10px]" title="Preferred brand">⭐</span>
+                          )}
                           {c.price != null && (
-                            <span className="text-xs font-bold text-primary">
-                              {c.price.toFixed(2)}€
-                            </span>
+                            <div className="flex items-baseline gap-1 flex-wrap">
+                              <span className="text-xs font-bold text-primary">{c.price.toFixed(2)}€</span>
+                              {c.unitPrice != null && c.unitLabel && (
+                                <span className="text-[10px] text-muted-foreground">{c.unitPrice.toFixed(2)}€/{c.unitLabel}</span>
+                              )}
+                            </div>
                           )}
                           <p className="text-xs font-medium leading-snug mt-1 line-clamp-2">{c.name}</p>
                           {c.brand && (
@@ -1203,12 +1336,12 @@ export default function GroceryListDetailPage() {
                           {c.weightValue && c.weightUnit && (
                             <p className="text-[10px] text-muted-foreground">{c.weightValue}{c.weightUnit}</p>
                           )}
-                          <Badge variant="outline" className="text-[10px] mt-1.5 truncate max-w-full">
+                          <Badge variant="outline" className={`text-[10px] mt-1.5 truncate max-w-full ${chainColor[c.chain] || ""}`}>
                             {c.store}
                           </Badge>
                           <button
                             className="absolute top-1.5 right-1.5 text-muted-foreground hover:text-foreground"
-                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.id); }}
+                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.id); setPreviewSourceItemName(item.itemName); }}
                             title="Preview"
                           >
                             <Info className="h-3 w-3" />
@@ -1333,6 +1466,13 @@ export default function GroceryListDetailPage() {
                                 </div>
                                 {bestOverall?.match ? (
                                   <div className="flex items-center gap-2 mt-1">
+                                    {/* Match confidence badge */}
+                                    {(() => {
+                                      const s = bestOverall.match.score ?? 0;
+                                      if (s >= 0.7) return <span className="text-[10px] text-emerald-600 font-semibold shrink-0" title="High confidence match">✓</span>;
+                                      if (s >= 0.35) return <span className="text-[10px] text-amber-500 font-semibold shrink-0" title="Likely match — verify">~</span>;
+                                      return <span className="text-[10px] text-red-400 font-semibold shrink-0" title="Uncertain match — check manually">?</span>;
+                                    })()}
                                     <span className="text-xs text-muted-foreground truncate">
                                       {bestOverall.match.productName}
                                       {bestOverall.match.brand && (
@@ -1449,6 +1589,11 @@ export default function GroceryListDetailPage() {
                                                   {c.price.toFixed(2)}€
                                                 </p>
                                               )}
+                                              {c.unitPrice != null && c.unitLabel && (
+                                                <p className="text-[10px] text-sky-600 dark:text-sky-400">
+                                                  {c.unitPrice.toFixed(2)}€/{c.unitLabel}
+                                                </p>
+                                              )}
                                             </div>
                                             <div className="flex flex-col items-center gap-1 shrink-0">
                                               {isSelected && <Check className="h-4 w-4 text-primary" />}
@@ -1481,6 +1626,43 @@ export default function GroceryListDetailPage() {
                         <ShoppingCart className="h-5 w-5" />
                         {t("compare.storeRecommendations") || "Store Recommendations"}
                       </CardTitle>
+                      {/* Travel mode selector — affects distance penalty in smart score */}
+                      {compareResult.smartRecommendation && (
+                        <div className="flex items-center gap-2 mt-2 flex-wrap">
+                          <span className="text-xs text-muted-foreground">
+                            {language === "lt" ? "Transportas:" : "Travel mode:"}
+                          </span>
+                          {([
+                            { label: language === "lt" ? "Pėsčias" : "Walking", value: 0.05 },
+                            { label: language === "lt" ? "Dviratis" : "Cycling", value: 0.1 },
+                            { label: language === "lt" ? "Automobilis" : "Car", value: 0.3 },
+                            { label: language === "lt" ? "Ignoruoti" : "Ignore dist.", value: 0 },
+                          ] as { label: string; value: number }[]).map((m) => (
+                            <button
+                              key={m.value}
+                              onClick={() => setTravelCostPerKm(m.value)}
+                              className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                                travelCostPerKm === m.value
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "border-border text-muted-foreground hover:border-primary/50"
+                              }`}
+                            >
+                              {m.label}
+                            </button>
+                          ))}
+                          <span className="text-[10px] text-muted-foreground ml-1">
+                            ({travelCostPerKm === 0 ? "—" : `${travelCostPerKm.toFixed(2)}€/km`})
+                          </span>
+                          {travelCostPerKm !== compareResult.smartRecommendation[0]?.travelPenalty / (compareResult.smartRecommendation[0]?.distanceKm ?? 1) / 2 && (
+                            <button
+                              onClick={comparePrices}
+                              className="text-[10px] text-primary underline ml-1"
+                            >
+                              {language === "lt" ? "Perskaičiuoti →" : "Recalculate →"}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </CardHeader>
                     <CardContent>
                       <Tabs defaultValue={compareResult.smartRecommendation ? "smart" : "single"}>
@@ -1506,6 +1688,14 @@ export default function GroceryListDetailPage() {
                             </p>
                             {compareResult.smartRecommendation.map((rec, idx) => {
                               const storeResult = recalculatedResults.find((s) => s.storeId === rec.storeId);
+                              const loyaltySavings = storeResult ? storeResult.items.reduce((sum, item) => {
+                                if (!item.match?.loyaltyPrice) return sum;
+                                const listItem = list.items.find((li) => li.itemName === item.itemName);
+                                const qty = listItem?.quantity ?? 1;
+                                const isPack = item.match.matchType === "pack";
+                                const withoutLoyalty = Math.min(item.match.price, item.match.salePrice ?? Infinity) * (isPack ? 1 : qty);
+                                return sum + Math.max(0, withoutLoyalty - item.lineCost);
+                              }, 0) : 0;
                               return (
                                 <Card
                                   key={rec.storeId}
@@ -1555,6 +1745,13 @@ export default function GroceryListDetailPage() {
                                         )}
                                       </div>
                                     </div>
+                                    {loyaltySavings > 0.005 && (
+                                      <div className="flex items-center gap-1.5 text-xs text-primary mt-2">
+                                        <CreditCard className="h-3.5 w-3.5 shrink-0" />
+                                        <span>{language === "lt" ? "Su lojalumo kortele" : "With loyalty card"}:</span>
+                                        <span className="font-semibold text-green-600 dark:text-green-400">-{loyaltySavings.toFixed(2)}€</span>
+                                      </div>
+                                    )}
                                     {storeResult && (
                                       <div className="mt-3 border-t pt-2 space-y-1">
                                         {storeResult.items.map((item, i) => (
@@ -1565,6 +1762,9 @@ export default function GroceryListDetailPage() {
                                               </span>
                                               {item.match?.brand && (
                                                 <span className="text-muted-foreground ml-1">({item.match.brand})</span>
+                                              )}
+                                              {item.match?.loyaltyPrice && item.match.loyaltyPrice < Math.min(item.match.price, item.match.salePrice ?? Infinity) && (
+                                                <CreditCard className="inline h-3 w-3 text-primary ml-1" />
                                               )}
                                             </div>
                                             <span className="font-medium shrink-0">
@@ -1593,6 +1793,14 @@ export default function GroceryListDetailPage() {
                               const savings = sr.storeId !== sorted[sorted.length - 1]?.storeId
                                 ? maxCost - sr.totalCost
                                 : null;
+                              const srLoyaltySavings = sr.items.reduce((sum, item) => {
+                                if (!item.match?.loyaltyPrice) return sum;
+                                const listItem = list.items.find((li) => li.itemName === item.itemName);
+                                const qty = listItem?.quantity ?? 1;
+                                const isPack = item.match.matchType === "pack";
+                                const withoutLoyalty = Math.min(item.match.price, item.match.salePrice ?? Infinity) * (isPack ? 1 : qty);
+                                return sum + Math.max(0, withoutLoyalty - item.lineCost);
+                              }, 0);
                               return (
                                 <Card
                                   key={sr.storeId}
@@ -1620,6 +1828,12 @@ export default function GroceryListDetailPage() {
                                         <p className="text-xs text-muted-foreground">
                                           {sr.matchedCount}/{list.items.length} {language === "lt" ? "rasta" : "found"}
                                         </p>
+                                        {srLoyaltySavings > 0.005 && (
+                                          <div className="flex items-center gap-1 justify-end text-[10px] text-primary mt-0.5">
+                                            <CreditCard className="h-3 w-3" />
+                                            <span className="text-green-600 dark:text-green-400 font-semibold">-{srLoyaltySavings.toFixed(2)}€</span>
+                                          </div>
+                                        )}
                                       </div>
                                     </div>
                                     <ul className="space-y-1.5">
@@ -1736,13 +1950,47 @@ export default function GroceryListDetailPage() {
       {previewProductId !== null && (
         <ProductPreviewModal
           productId={previewProductId}
-          onClose={() => setPreviewProductId(null)}
-          onAddToList={async (name) => {
+          onClose={() => { setPreviewProductId(null); setPreviewSourceItemName(null); }}
+          addToListLabel={previewSourceItemName ? `Select for "${previewSourceItemName}"` : "Add to list"}
+          onAddToList={async (name, weightValue, weightUnit) => {
             if (!list) return;
-            const items = [...list.items, { itemName: name, quantity: 1, unit: null, checked: false }];
-            setList({ ...list, items });
-            setProductSuggestions({});
-            await saveItems(items);
+            if (previewSourceItemName) {
+              // Update the existing item: rename it and compute how many packs are needed
+              const sourceItem = list.items.find((i) => i.itemName === previewSourceItemName);
+              const packs = sourceItem
+                ? calcPacksNeeded(sourceItem.quantity, sourceItem.unit, weightValue, weightUnit)
+                : 1;
+              const items = list.items.map((i) =>
+                i.itemName === previewSourceItemName
+                  ? { ...i, itemName: name, quantity: packs, unit: null }
+                  : i
+              );
+              setList({ ...list, items });
+              // Re-key productSuggestions so the Products tab still shows results
+              setProductSuggestions((prev) => {
+                const next = { ...prev };
+                if (next[previewSourceItemName]) {
+                  next[name] = next[previewSourceItemName];
+                  delete next[previewSourceItemName];
+                }
+                return next;
+              });
+              setPreviewSourceItemName(null);
+              setParsedPreview(`Selected: ${name}${packs > 1 ? ` ×${packs}` : ""}`);
+              setTimeout(() => setParsedPreview(null), 3000);
+              await saveItems(items);
+            } else {
+              // Add as a new item (opened from autocomplete suggestions)
+              const items = [...list.items, { itemName: name, quantity: 1, unit: null, checked: false }];
+              setList({ ...list, items });
+              setNewItem("");
+              setPickedSuggestion(null);
+              setSuggestions([]);
+              setShowSuggestions(false);
+              setParsedPreview(`Added: ${name}`);
+              setTimeout(() => setParsedPreview(null), 3000);
+              await saveItems(items);
+            }
           }}
         />
       )}
