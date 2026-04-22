@@ -126,6 +126,7 @@ model GroceryListItem {
   unit               String?
   checked            Boolean @default(false)
   pinnedProductGroupId Int?  // if set, use this product group for comparison
+  pinnedProductId    Int?    // specific product chosen via Products tab
   preferredBrand     String? // brand preference for this item
 
   list GroceryList @relation(fields: [listId], references: [id], onDelete: Cascade)

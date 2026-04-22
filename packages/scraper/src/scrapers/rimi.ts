@@ -103,10 +103,12 @@ export class RimiScraper extends BaseScraper {
     categoryName: string
   ): Promise<ScrapedProduct[]> {
     const products: ScrapedProduct[] = [];
+    const seenIds = new Set<string>();
+    const MAX_PAGES = 50;
     let currentPage = 1;
     const pageSize = 80;
 
-    while (true) {
+    while (currentPage <= MAX_PAGES) {
       const pageUrl =
         currentPage === 1
           ? `${url}?currentPage=1&pageSize=${pageSize}`
@@ -184,7 +186,12 @@ export class RimiScraper extends BaseScraper {
 
       if (pageProducts.length === 0) break;
 
+      let newCount = 0;
       for (const p of pageProducts) {
+        if (seenIds.has(p.externalId)) continue;
+        seenIds.add(p.externalId);
+        newCount++;
+
         const prices = this.parsePriceText(p.priceText);
         const weight = this.extractWeight(p.name);
 
@@ -200,11 +207,7 @@ export class RimiScraper extends BaseScraper {
         });
       }
 
-      // Check if there's a next page link
-      const hasNext = await page
-        .$(`a[href*="currentPage=${currentPage + 1}"]`)
-        .then((el) => !!el);
-      if (!hasNext) break;
+      if (newCount === 0) break;
 
       currentPage++;
       await this.delay(1000);

@@ -42,6 +42,7 @@ export async function POST(
         quantity: item.quantity,
         unit: item.unit,
         checked: false,
+        pinnedProductId: item.pinnedProductId,
       },
     });
   }

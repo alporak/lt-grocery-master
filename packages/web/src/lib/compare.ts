@@ -8,6 +8,7 @@ interface CompareItem {
   itemName: string;
   quantity: number;
   unit?: string;
+  pinnedProductId?: number | null;
 }
 
 // Units where qty > 1 means "find a multi-pack, not N single items"
@@ -91,13 +92,75 @@ export async function compareGroceryList(
 ): Promise<CompareResult> {
   const stores = await prisma.store.findMany({ where: { enabled: true } });
 
+  // Pre-resolve any items pinned to a specific product: the user's chosen
+  // product becomes the match in its own store, and findSimilarByProduct
+  // carries brand/weight/category across the other stores.
+  const pinnedResolved = new Map<
+    string,
+    {
+      refStoreId: number;
+      refMatch: StoreMatch;
+      similarByStore: Record<number, StoreMatch[]>;
+    }
+  >();
+  await Promise.all(
+    items
+      .filter((i) => typeof i.pinnedProductId === "number" && i.pinnedProductId! > 0)
+      .map(async (item) => {
+        const refProduct = await prisma.product.findUnique({
+          where: { id: item.pinnedProductId! },
+          include: { priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 } },
+        });
+        const pr = refProduct?.priceRecords[0];
+        if (!refProduct || !pr) return;
+        const refMatch: StoreMatch = {
+          productId: refProduct.id,
+          productName:
+            language === "en" ? refProduct.nameEn || refProduct.nameLt : refProduct.nameLt,
+          price: pr.regularPrice,
+          unitPrice: pr.unitPrice ?? undefined,
+          unitLabel: pr.unitLabel ?? undefined,
+          salePrice: pr.salePrice ?? undefined,
+          loyaltyPrice: pr.loyaltyPrice ?? undefined,
+          brand: refProduct.brand ?? undefined,
+          weightValue: refProduct.weightValue ?? undefined,
+          weightUnit: refProduct.weightUnit ?? undefined,
+          imageUrl: refProduct.imageUrl ?? undefined,
+          nameLt: refProduct.nameLt,
+          nameEn: refProduct.nameEn ?? undefined,
+          categoryLt: refProduct.categoryLt ?? undefined,
+          score: 1,
+        };
+        const similar = await findSimilarByProduct(refProduct.id, language);
+        pinnedResolved.set(item.itemName, {
+          refStoreId: refProduct.storeId,
+          refMatch,
+          similarByStore: similar,
+        });
+      })
+  );
+
   const storeResults: StoreResult[] = [];
 
   for (const store of stores) {
     const storeItems: StoreResult["items"] = [];
 
     for (const item of items) {
-      const candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit);
+      const pinned = pinnedResolved.get(item.itemName);
+      let candidates: StoreMatch[];
+      if (pinned) {
+        if (store.id === pinned.refStoreId) {
+          candidates = [pinned.refMatch];
+        } else {
+          candidates = pinned.similarByStore[store.id] ?? [];
+        }
+        // Fallback to text search if pinned lookup yielded nothing in this store
+        if (candidates.length === 0) {
+          candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit);
+        }
+      } else {
+        candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit);
+      }
       const match = candidates.length > 0 ? candidates[0] : null;
       const lineCost = match ? computeLineCost(match, item.quantity) : 0;
 

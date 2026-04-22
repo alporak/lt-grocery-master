@@ -55,6 +55,8 @@ export async function PUT(
           quantity: item.quantity || 1,
           unit: item.unit || null,
           checked: item.checked || false,
+          pinnedProductId:
+            typeof item.pinnedProductId === "number" ? item.pinnedProductId : null,
         },
       });
     }

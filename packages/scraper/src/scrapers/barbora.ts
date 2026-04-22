@@ -139,9 +139,11 @@ export class BarboraScraper {
     categoryName: string
   ): Promise<ScrapedProduct[]> {
     const products: ScrapedProduct[] = [];
+    const seenIds = new Set<string>();
+    const MAX_PAGES = 50;
     let pageNum = 1;
 
-    while (true) {
+    while (pageNum <= MAX_PAGES) {
       const pageUrl = pageNum === 1 ? url : `${url}?page=${pageNum}`;
       await page.goto(pageUrl, {
         waitUntil: "domcontentloaded",
@@ -200,7 +202,12 @@ export class BarboraScraper {
 
       if (pageProducts.length === 0) break;
 
+      let newCount = 0;
       for (const p of pageProducts) {
+        if (seenIds.has(p.externalId)) continue;
+        seenIds.add(p.externalId);
+        newCount++;
+
         const prices = this.parsePriceText(p.priceText);
         const weight = this.extractWeight(p.name);
 
@@ -216,12 +223,10 @@ export class BarboraScraper {
         });
       }
 
-      this.log(`  Page ${pageNum}: ${pageProducts.length} products`);
+      this.log(`  Page ${pageNum}: ${pageProducts.length} products (${newCount} new)`);
 
-      const hasNextPage = await page
-        .$(`a[href*="page=${pageNum + 1}"]`)
-        .then((el) => !!el);
-      if (!hasNextPage) break;
+      // Past-last-page: server often serves page 1 again, trust "no new ids" over DOM paginator links.
+      if (newCount === 0) break;
 
       pageNum++;
       await this.delay(1000 + Math.random() * 1000);

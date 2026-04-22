@@ -64,6 +64,25 @@ interface GroceryItem {
   quantity: number;
   unit: string | null;
   checked: boolean;
+  pinnedProductId?: number | null;
+}
+
+interface StoreMatchLite {
+  productId: number;
+  productName: string;
+  price: number;
+  salePrice?: number;
+  loyaltyPrice?: number;
+  unitPrice?: number;
+  unitLabel?: string;
+  brand?: string;
+  weightValue?: number;
+  weightUnit?: string;
+  imageUrl?: string;
+  nameLt?: string;
+  nameEn?: string;
+  categoryLt?: string;
+  score?: number;
 }
 
 interface GroceryList {
@@ -193,6 +212,11 @@ export default function GroceryListDetailPage() {
   const [productSuggestionsLoading, setProductSuggestionsLoading] = useState(false);
   const [categoryFilters, setCategoryFilters] = useState<Record<string, string | null>>({});
 
+  // Cross-store similar picks keyed by itemName, populated when user pins a product.
+  // Shape: { [itemName]: { [storeId]: StoreMatchLite[] } }
+  const [similarByItem, setSimilarByItem] = useState<Record<string, Record<number, StoreMatchLite[]>>>({});
+  const [similarLoading, setSimilarLoading] = useState<Set<string>>(new Set());
+
   // Dietary filter for Products tab
   const [dietaryFilter, setDietaryFilter] = useState<DietaryFilter | null>(null);
 
@@ -250,6 +274,33 @@ export default function GroceryListDetailPage() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list?.id]); // only fire once when list first loads
+
+  // Restore cross-store similar picks for any items that already have pinnedProductId on load
+  useEffect(() => {
+    if (!list) return;
+    const pinned = list.items.filter((i) => typeof i.pinnedProductId === "number" && i.pinnedProductId! > 0);
+    if (pinned.length === 0) return;
+    (async () => {
+      await Promise.all(
+        pinned.map(async (item) => {
+          if (!item.pinnedProductId) return;
+          try {
+            const similar: Record<string, StoreMatchLite[]> = await fetch("/api/products/similar", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ productId: item.pinnedProductId }),
+            }).then((r) => r.json());
+            const numericKeyed: Record<number, StoreMatchLite[]> = {};
+            for (const [k, v] of Object.entries(similar)) {
+              numericKeyed[Number(k)] = v;
+            }
+            setSimilarByItem((prev) => ({ ...prev, [item.itemName]: numericKeyed }));
+          } catch { /* silent */ }
+        })
+      );
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list?.id]); // once on load
 
   // Autocomplete suggestions
   useEffect(() => {
@@ -417,9 +468,17 @@ export default function GroceryListDetailPage() {
 
   const removeItem = async (index: number) => {
     if (!list) return;
+    const removed = list.items[index];
     const items = list.items.filter((_, i) => i !== index);
     setList({ ...list, items });
     setProductSuggestions({});
+    if (removed) {
+      setSimilarByItem((prev) => {
+        const next = { ...prev };
+        delete next[removed.itemName];
+        return next;
+      });
+    }
     await saveItems(items);
   };
 
@@ -481,6 +540,7 @@ export default function GroceryListDetailPage() {
             itemName: i.itemName,
             quantity: i.quantity,
             unit: i.unit || undefined,
+            pinnedProductId: i.pinnedProductId ?? undefined,
           })),
           language,
           travelCostPerKm,
@@ -491,11 +551,6 @@ export default function GroceryListDetailPage() {
       console.error(err);
     }
     setComparing(false);
-  };
-
-  const handleFindPrices = async () => {
-    await comparePrices();
-    setActiveTab("compare");
   };
 
   const exportList = () => {
@@ -786,7 +841,19 @@ export default function GroceryListDetailPage() {
       </div>
 
       {/* 3-tab layout */}
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => {
+          const next = v as typeof activeTab;
+          setActiveTab(next);
+          if (next === "products" && !hasProductSuggestions && itemCount > 0 && !productSuggestionsLoading) {
+            fetchProductSuggestions();
+          }
+          if (next === "compare" && !compareResult && itemCount > 0 && !comparing) {
+            comparePrices();
+          }
+        }}
+      >
         <TabsList className="w-full">
           <TabsTrigger value="items" className="flex-1">
             <ClipboardList className="h-3.5 w-3.5 mr-1.5" />
@@ -795,15 +862,11 @@ export default function GroceryListDetailPage() {
               <span className="ml-1.5 text-xs opacity-70">({itemCount})</span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="products" className="flex-1" disabled={itemCount === 0}>
+          <TabsTrigger value="products" className="flex-1">
             <Package className="h-3.5 w-3.5 mr-1.5" />
             {language === "lt" ? "Produktai" : "Products"}
           </TabsTrigger>
-          <TabsTrigger
-            value="compare"
-            className="flex-1"
-            disabled={!compareResult && itemCount === 0}
-          >
+          <TabsTrigger value="compare" className="flex-1">
             <Scale className="h-3.5 w-3.5 mr-1.5" />
             {language === "lt" ? "Palyginti" : "Compare"}
           </TabsTrigger>
@@ -1148,20 +1211,6 @@ export default function GroceryListDetailPage() {
             </CardContent>
           </Card>
 
-          {/* CTA to go to Products tab */}
-          {itemCount > 0 && (
-            <Button
-              variant="outline"
-              className="w-full gap-2"
-              onClick={() => {
-                setActiveTab("products");
-                if (!hasProductSuggestions) fetchProductSuggestions();
-              }}
-            >
-              <Package className="h-4 w-4" />
-              {language === "lt" ? "Rasti produktus →" : "Find Products →"}
-            </Button>
-          )}
         </TabsContent>
 
         {/* ─── Tab 2: Products ─── */}
@@ -1223,9 +1272,13 @@ export default function GroceryListDetailPage() {
               <CardContent className="py-10 text-center">
                 <Package className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
                 <p className="text-muted-foreground text-sm">
-                  {language === "lt"
-                    ? "Spustelėkite 'Ieškoti produktų', kad rastumėte atitikmenų kiekvienai prekei."
-                    : "Click 'Find Products' to search for matches for each item."}
+                  {itemCount === 0
+                    ? (language === "lt"
+                        ? "Dar nėra prekių. Pridėkite prekių skirtuke 'Prekės'."
+                        : "No items yet. Add items on the Items tab to see product suggestions.")
+                    : (language === "lt"
+                        ? "Spustelėkite 'Ieškoti produktų', kad rastumėte atitikmenų kiekvienai prekei."
+                        : "Click 'Find Products' to search for matches for each item.")}
                 </p>
               </CardContent>
             </Card>
@@ -1259,6 +1312,9 @@ export default function GroceryListDetailPage() {
             const itemPreferredBrand = allCandidates[0]?.canonicalCategory
               ? getPreferredBrand(allCandidates[0].canonicalCategory)
               : null;
+            const pinnedId = item.pinnedProductId ?? null;
+            const itemSimilar = similarByItem[item.itemName] ?? {};
+            const itemSimilarLoading = similarLoading.has(item.itemName);
 
             return (
               <Card key={item.itemName}>
@@ -1269,6 +1325,15 @@ export default function GroceryListDetailPage() {
                       <Badge variant="secondary" className="text-xs">
                         ×{item.quantity}{item.unit ? ` ${item.unit}` : ""}
                       </Badge>
+                    )}
+                    {pinnedId && (
+                      <Badge className="text-xs gap-1 bg-emerald-600 text-white">
+                        <Check className="h-2.5 w-2.5" />
+                        {language === "lt" ? "Pasirinkta" : "Selected"}
+                      </Badge>
+                    )}
+                    {itemSimilarLoading && (
+                      <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
                     )}
                     {allCandidates.length === 0 && (
                       <Badge variant="outline" className="text-xs text-red-500">
@@ -1306,73 +1371,100 @@ export default function GroceryListDetailPage() {
                   </div>
                 </CardHeader>
                 {candidates.length > 0 && (
-                  <CardContent className="pt-0">
+                  <CardContent className="pt-0 space-y-3">
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {candidates.map((c) => (
-                        <div
-                          key={c.id}
-                          className={`border rounded-lg p-2.5 cursor-pointer hover:border-primary hover:bg-accent/30 transition-colors relative ${
-                            itemPreferredBrand && c.brand === itemPreferredBrand
-                              ? "border-amber-400/60 bg-amber-50/30 dark:bg-amber-900/10"
-                              : ""
-                          }`}
-                          onClick={() => { setPreviewProductId(c.id); setPreviewSourceItemName(item.itemName); }}
-                        >
-                          {itemPreferredBrand && c.brand === itemPreferredBrand && (
-                            <span className="absolute top-1.5 left-1.5 text-[10px]" title="Preferred brand">⭐</span>
-                          )}
-                          {c.price != null && (
-                            <div className="flex items-baseline gap-1 flex-wrap">
-                              <span className="text-xs font-bold text-primary">{c.price.toFixed(2)}€</span>
-                              {c.unitPrice != null && c.unitLabel && (
-                                <span className="text-[10px] text-muted-foreground">{c.unitPrice.toFixed(2)}€/{c.unitLabel}</span>
-                              )}
-                            </div>
-                          )}
-                          <p className="text-xs font-medium leading-snug mt-1 line-clamp-2">{c.name}</p>
-                          {c.brand && (
-                            <p className="text-[10px] text-muted-foreground mt-0.5">{c.brand}</p>
-                          )}
-                          {c.weightValue && c.weightUnit && (
-                            <p className="text-[10px] text-muted-foreground">{c.weightValue}{c.weightUnit}</p>
-                          )}
-                          <Badge variant="outline" className={`text-[10px] mt-1.5 truncate max-w-full ${chainColor[c.chain] || ""}`}>
-                            {c.store}
-                          </Badge>
-                          <button
-                            className="absolute top-1.5 right-1.5 text-muted-foreground hover:text-foreground"
-                            onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.id); setPreviewSourceItemName(item.itemName); }}
-                            title="Preview"
+                      {candidates.map((c) => {
+                        const isPinned = pinnedId === c.id;
+                        return (
+                          <div
+                            key={c.id}
+                            className={`border rounded-lg p-2.5 cursor-pointer hover:border-primary hover:bg-accent/30 transition-colors relative ${
+                              isPinned
+                                ? "border-emerald-500 bg-emerald-50/30 dark:bg-emerald-900/10"
+                                : itemPreferredBrand && c.brand === itemPreferredBrand
+                                  ? "border-amber-400/60 bg-amber-50/30 dark:bg-amber-900/10"
+                                  : ""
+                            }`}
+                            onClick={() => { setPreviewProductId(c.id); setPreviewSourceItemName(item.itemName); }}
                           >
-                            <Info className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))}
+                            {isPinned && (
+                              <span className="absolute top-1.5 left-1.5 text-emerald-600" title="Your selection">
+                                <Check className="h-3 w-3" />
+                              </span>
+                            )}
+                            {!isPinned && itemPreferredBrand && c.brand === itemPreferredBrand && (
+                              <span className="absolute top-1.5 left-1.5 text-[10px]" title="Preferred brand">⭐</span>
+                            )}
+                            {c.price != null && (
+                              <div className="flex items-baseline gap-1 flex-wrap">
+                                <span className="text-xs font-bold text-primary">{c.price.toFixed(2)}€</span>
+                                {c.unitPrice != null && c.unitLabel && (
+                                  <span className="text-[10px] text-muted-foreground">{c.unitPrice.toFixed(2)}€/{c.unitLabel}</span>
+                                )}
+                              </div>
+                            )}
+                            <p className="text-xs font-medium leading-snug mt-1 line-clamp-2">{c.name}</p>
+                            {c.brand && (
+                              <p className="text-[10px] text-muted-foreground mt-0.5">{c.brand}</p>
+                            )}
+                            {c.weightValue && c.weightUnit && (
+                              <p className="text-[10px] text-muted-foreground">{c.weightValue}{c.weightUnit}</p>
+                            )}
+                            <Badge variant="outline" className={`text-[10px] mt-1.5 truncate max-w-full ${chainColor[c.chain] || ""}`}>
+                              {c.store}
+                            </Badge>
+                            <button
+                              className="absolute top-1.5 right-1.5 text-muted-foreground hover:text-foreground"
+                              onClick={(e) => { e.stopPropagation(); setPreviewProductId(c.id); setPreviewSourceItemName(item.itemName); }}
+                              title="Preview"
+                            >
+                              <Info className="h-3 w-3" />
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
+
+                    {/* Cross-store picks strip — shown when user has selected a product */}
+                    {pinnedId && Object.keys(itemSimilar).length > 0 && (
+                      <div className="border rounded-md p-2.5 bg-muted/30 space-y-1.5">
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                          {language === "lt" ? "Automatiškai pasirinkta kitose parduotuvėse:" : "Auto-picked in other stores:"}
+                        </p>
+                        <div className="flex flex-col gap-1">
+                          {Object.entries(itemSimilar).map(([storeIdStr, matches]) => {
+                            const best = matches[0];
+                            if (!best) return null;
+                            return (
+                              <div key={storeIdStr} className="flex items-center gap-2 text-xs">
+                                <button
+                                  className="flex-1 flex items-center gap-2 hover:bg-accent/50 rounded px-1 py-0.5 text-left"
+                                  onClick={() => setPreviewProductId(best.productId)}
+                                  title="Preview"
+                                >
+                                  <span className="font-medium truncate">{best.productName}</span>
+                                  {best.brand && (
+                                    <span className="text-muted-foreground shrink-0">· {best.brand}</span>
+                                  )}
+                                  {best.weightValue && best.weightUnit && (
+                                    <span className="text-muted-foreground shrink-0">{best.weightValue}{best.weightUnit}</span>
+                                  )}
+                                  {best.price != null && (
+                                    <span className="font-semibold text-primary shrink-0 ml-auto">{best.price.toFixed(2)}€</span>
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </CardContent>
                 )}
               </Card>
             );
           })}
 
-          {/* Find Best Prices CTA */}
-          {itemCount > 0 && (
-            <Button
-              onClick={handleFindPrices}
-              disabled={comparing}
-              className="w-full gap-2"
-              size="lg"
-            >
-              {comparing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Scale className="h-4 w-4" />
-              )}
-              {comparing
-                ? t("common.loading")
-                : (language === "lt" ? "Rasti geriausias kainas →" : "Find Best Prices →")}
-            </Button>
-          )}
         </TabsContent>
 
         {/* ─── Tab 3: Compare ─── */}
@@ -1380,17 +1472,32 @@ export default function GroceryListDetailPage() {
           {!compareResult ? (
             <Card>
               <CardContent className="py-10 text-center">
-                <Scale className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
-                <p className="text-muted-foreground text-sm mb-4">
-                  {language === "lt"
-                    ? "Dar nėra rezultatų. Eikite į skirtuką 'Produktai' ir ieškokite geriausių kainų."
-                    : "No results yet. Go to the Products tab and find the best prices."}
-                </p>
-                {itemCount > 0 && (
-                  <Button onClick={handleFindPrices} disabled={comparing} className="gap-2">
-                    {comparing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scale className="h-4 w-4" />}
-                    {comparing ? t("common.loading") : (language === "lt" ? "Palyginti kainas" : "Compare Prices")}
-                  </Button>
+                {comparing ? (
+                  <>
+                    <Loader2 className="h-8 w-8 mx-auto text-muted-foreground mb-3 animate-spin" />
+                    <p className="text-muted-foreground text-sm">
+                      {language === "lt" ? "Lyginame kainas..." : "Comparing prices..."}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <Scale className="h-10 w-10 mx-auto text-muted-foreground mb-3" />
+                    <p className="text-muted-foreground text-sm mb-4">
+                      {itemCount === 0
+                        ? (language === "lt"
+                            ? "Dar nėra prekių. Pridėkite prekių skirtuke 'Prekės'."
+                            : "No items yet. Add items on the Items tab to compare prices.")
+                        : (language === "lt"
+                            ? "Paspauskite mygtuką, kad palygintumėte kainas."
+                            : "Tap the button to compare prices.")}
+                    </p>
+                    {itemCount > 0 && (
+                      <Button onClick={comparePrices} disabled={comparing} className="gap-2">
+                        <Scale className="h-4 w-4" />
+                        {language === "lt" ? "Palyginti kainas" : "Compare Prices"}
+                      </Button>
+                    )}
+                  </>
                 )}
               </CardContent>
             </Card>
@@ -1955,30 +2062,50 @@ export default function GroceryListDetailPage() {
           onAddToList={async (name, weightValue, weightUnit) => {
             if (!list) return;
             if (previewSourceItemName) {
-              // Update the existing item: rename it and compute how many packs are needed
+              // Pin the selected product to the item WITHOUT renaming it.
+              // itemName stays as the user typed it (e.g. "milk").
               const sourceItem = list.items.find((i) => i.itemName === previewSourceItemName);
               const packs = sourceItem
                 ? calcPacksNeeded(sourceItem.quantity, sourceItem.unit, weightValue, weightUnit)
                 : 1;
+              const pinnedId = previewProductId;
               const items = list.items.map((i) =>
                 i.itemName === previewSourceItemName
-                  ? { ...i, itemName: name, quantity: packs, unit: null }
+                  ? { ...i, pinnedProductId: pinnedId, quantity: packs, unit: null }
                   : i
               );
               setList({ ...list, items });
-              // Re-key productSuggestions so the Products tab still shows results
-              setProductSuggestions((prev) => {
-                const next = { ...prev };
-                if (next[previewSourceItemName]) {
-                  next[name] = next[previewSourceItemName];
-                  delete next[previewSourceItemName];
-                }
-                return next;
-              });
+
+              const closedSourceItemName = previewSourceItemName;
               setPreviewSourceItemName(null);
+              setPreviewProductId(null);
+
               setParsedPreview(`Selected: ${name}${packs > 1 ? ` ×${packs}` : ""}`);
               setTimeout(() => setParsedPreview(null), 3000);
               await saveItems(items);
+
+              // Fetch cross-store similar products and cache in state
+              if (pinnedId) {
+                setSimilarLoading((prev) => new Set([...prev, closedSourceItemName]));
+                try {
+                  const similar: Record<string, StoreMatchLite[]> = await fetch("/api/products/similar", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ productId: pinnedId }),
+                  }).then((r) => r.json());
+                  const numericKeyed: Record<number, StoreMatchLite[]> = {};
+                  for (const [k, v] of Object.entries(similar)) {
+                    numericKeyed[Number(k)] = v;
+                  }
+                  setSimilarByItem((prev) => ({ ...prev, [closedSourceItemName]: numericKeyed }));
+                } catch { /* silent */ } finally {
+                  setSimilarLoading((prev) => {
+                    const next = new Set(prev);
+                    next.delete(closedSourceItemName);
+                    return next;
+                  });
+                }
+              }
             } else {
               // Add as a new item (opened from autocomplete suggestions)
               const items = [...list.items, { itemName: name, quantity: 1, unit: null, checked: false }];

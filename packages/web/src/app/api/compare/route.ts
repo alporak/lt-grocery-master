@@ -9,7 +9,15 @@ let geoCache: { address: string; lat: number; lng: number } | null = null;
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const items = body.items;
+  const items = Array.isArray(body.items)
+    ? body.items.map((i: { itemName: string; quantity: number; unit?: string; pinnedProductId?: number | null }) => ({
+        itemName: i.itemName,
+        quantity: i.quantity,
+        unit: i.unit,
+        pinnedProductId:
+          typeof i.pinnedProductId === "number" ? i.pinnedProductId : null,
+      }))
+    : [];
   const language = body.language || "lt";
   const travelCostPerKm: number = typeof body.travelCostPerKm === "number"
     ? Math.max(0, Math.min(body.travelCostPerKm, 5))
