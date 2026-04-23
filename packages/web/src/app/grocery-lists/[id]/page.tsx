@@ -67,6 +67,8 @@ interface GroceryItem {
   pinnedProductId?: number | null;
 }
 
+type MatchStatus = "aligned" | "closest-alt" | "unavailable";
+
 interface StoreMatchLite {
   productId: number;
   productName: string;
@@ -91,48 +93,43 @@ interface GroceryList {
   items: GroceryItem[];
 }
 
+interface StoreProductMatch {
+  productId: number;
+  productName: string;
+  price: number;
+  salePrice?: number;
+  loyaltyPrice?: number;
+  unitPrice?: number;
+  unitLabel?: string;
+  brand?: string;
+  weightValue?: number;
+  weightUnit?: string;
+  imageUrl?: string;
+  nameLt?: string;
+  nameEn?: string;
+  categoryLt?: string;
+  score?: number;
+  matchType?: "pack" | "unit";
+  status?: MatchStatus;
+}
+
+interface ItemAnchor {
+  itemName: string;
+  anchorProductId: number;
+  anchorProductName: string;
+  anchorStoreId: number;
+  anchorStoreName: string;
+  category: string | null;
+}
+
 interface StoreCompareResult {
   storeId: number;
   storeName: string;
   storeChain: string;
   items: Array<{
     itemName: string;
-    match: {
-      productId: number;
-      productName: string;
-      price: number;
-      salePrice?: number;
-      loyaltyPrice?: number;
-      unitPrice?: number;
-      unitLabel?: string;
-      brand?: string;
-      weightValue?: number;
-      weightUnit?: string;
-      imageUrl?: string;
-      nameLt?: string;
-      nameEn?: string;
-      categoryLt?: string;
-      score?: number;
-      matchType?: "pack" | "unit";
-    } | null;
-    candidates: Array<{
-      productId: number;
-      productName: string;
-      price: number;
-      salePrice?: number;
-      loyaltyPrice?: number;
-      unitPrice?: number;
-      unitLabel?: string;
-      brand?: string;
-      weightValue?: number;
-      weightUnit?: string;
-      imageUrl?: string;
-      nameLt?: string;
-      nameEn?: string;
-      categoryLt?: string;
-      score?: number;
-      matchType?: "pack" | "unit";
-    }>;
+    match: StoreProductMatch | null;
+    candidates: StoreProductMatch[];
     lineCost: number;
   }>;
   totalCost: number;
@@ -167,6 +164,7 @@ interface CompareResult {
     totalCost: number;
   };
   smartRecommendation?: SmartRecommendation[];
+  itemAnchors?: ItemAnchor[];
 }
 
 export default function GroceryListDetailPage() {
@@ -697,7 +695,9 @@ export default function GroceryListDetailPage() {
     }
   };
 
-  // Recalculate store totals based on current candidate selections
+  // Recalculate store totals based on current candidate selections.
+  // Only "aligned" matches count toward matchedCount and totalCost —
+  // "closest-alt" matches are shown dimmed and excluded from financial totals.
   const recalculatedResults = useMemo(() => {
     if (!compareResult || !list) return null;
     return compareResult.storeResults.map((sr) => {
@@ -709,7 +709,8 @@ export default function GroceryListDetailPage() {
         const listItem = list.items.find((li) => li.itemName === item.itemName);
         const qty = listItem?.quantity ?? 1;
         let lineCost = 0;
-        if (match) {
+        const isAligned = match && (match.status === "aligned" || match.status == null);
+        if (isAligned) {
           lineCost = computeLineCost(match, qty);
           matchedCount++;
         }
@@ -1537,14 +1538,27 @@ export default function GroceryListDetailPage() {
                     <CardContent className="space-y-2">
                       {list.items.map((item) => {
                         const isExpanded = expandedItems.has(item.itemName);
-                        const allStoreCandidates = recalculatedResults.map((sr) => {
+                        const itemAnchor = compareResult?.itemAnchors?.find((a) => a.itemName === item.itemName);
+
+                        // Aligned stores: have a proper category-matching product
+                        const alignedStoreCandidates = recalculatedResults.map((sr) => {
                           const storeItem = sr.items.find((i) => i.itemName === item.itemName);
                           return { store: sr, storeItem };
-                        }).filter((x) => x.storeItem?.match);
+                        }).filter((x) => {
+                          const m = x.storeItem?.match;
+                          return m && (m.status === "aligned" || m.status == null);
+                        });
 
-                        const bestOverall = allStoreCandidates.reduce<{
+                        // Closest-alt stores: have something but it's a different category
+                        const closestAltStoreCandidates = recalculatedResults.map((sr) => {
+                          const storeItem = sr.items.find((i) => i.itemName === item.itemName);
+                          return { store: sr, storeItem };
+                        }).filter((x) => x.storeItem?.match?.status === "closest-alt");
+
+                        // Best aligned match (cheapest among aligned stores)
+                        const bestOverall = alignedStoreCandidates.reduce<{
                           store: typeof recalculatedResults[0];
-                          match: NonNullable<typeof allStoreCandidates[0]["storeItem"]>["match"];
+                          match: NonNullable<typeof alignedStoreCandidates[0]["storeItem"]>["match"];
                           lineCost: number;
                         } | null>((best, { store, storeItem }) => {
                           if (!storeItem?.match) return best;
@@ -1553,7 +1567,8 @@ export default function GroceryListDetailPage() {
                           return best;
                         }, null);
 
-                        const foundCount = allStoreCandidates.length;
+                        const alignedCount = alignedStoreCandidates.length;
+                        const totalStores = recalculatedResults.length;
                         const isAutoMatching = autoMatchLoading.has(item.itemName);
 
                         return (
@@ -1573,13 +1588,7 @@ export default function GroceryListDetailPage() {
                                 </div>
                                 {bestOverall?.match ? (
                                   <div className="flex items-center gap-2 mt-1">
-                                    {/* Match confidence badge */}
-                                    {(() => {
-                                      const s = bestOverall.match.score ?? 0;
-                                      if (s >= 0.7) return <span className="text-[10px] text-emerald-600 font-semibold shrink-0" title="High confidence match">✓</span>;
-                                      if (s >= 0.35) return <span className="text-[10px] text-amber-500 font-semibold shrink-0" title="Likely match — verify">~</span>;
-                                      return <span className="text-[10px] text-red-400 font-semibold shrink-0" title="Uncertain match — check manually">?</span>;
-                                    })()}
+                                    <span className="text-[10px] text-emerald-600 font-semibold shrink-0" title="Same item found">✓</span>
                                     <span className="text-xs text-muted-foreground truncate">
                                       {bestOverall.match.productName}
                                       {bestOverall.match.brand && (
@@ -1588,6 +1597,13 @@ export default function GroceryListDetailPage() {
                                       {bestOverall.match.weightValue && bestOverall.match.weightUnit && (
                                         <span className="text-muted-foreground/70"> · {bestOverall.match.weightValue}{bestOverall.match.weightUnit}</span>
                                       )}
+                                    </span>
+                                  </div>
+                                ) : closestAltStoreCandidates.length > 0 ? (
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="text-[10px] text-amber-500 font-semibold shrink-0" title="No exact match — alternatives available">~</span>
+                                    <span className="text-xs text-amber-600/70 italic truncate">
+                                      {language === "lt" ? "Tiksli prekė nerasta" : "No exact match"} · {closestAltStoreCandidates.length} {language === "lt" ? "alternatyv" : "alt"}
                                     </span>
                                   </div>
                                 ) : (
@@ -1608,8 +1624,12 @@ export default function GroceryListDetailPage() {
                                 {isAutoMatching && (
                                   <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
                                 )}
-                                <Badge variant="outline" className="text-[10px]">
-                                  {foundCount}/{recalculatedResults.length}
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[10px] ${alignedCount === 0 ? "border-red-300 text-red-500" : alignedCount < totalStores ? "border-amber-300 text-amber-600" : ""}`}
+                                  title={alignedCount < totalStores && closestAltStoreCandidates.length > 0 ? `${closestAltStoreCandidates.length} store(s) have alternatives (different category)` : undefined}
+                                >
+                                  {alignedCount}/{totalStores}
                                 </Badge>
                                 {isExpanded ? (
                                   <ChevronUp className="h-4 w-4 text-muted-foreground" />
@@ -1621,15 +1641,31 @@ export default function GroceryListDetailPage() {
 
                             {isExpanded && (
                               <div className="border-t bg-muted/30 px-4 py-3 space-y-3">
+                                {itemAnchor && itemAnchor.category && (
+                                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground pb-1 border-b border-dashed">
+                                    <span className="opacity-60">{language === "lt" ? "Ieškoma kategorija:" : "Searching for:"}</span>
+                                    <Badge variant="secondary" className="text-[10px] py-0 px-1.5 font-normal">
+                                      {itemAnchor.category.replace(/\//g, " › ")}
+                                    </Badge>
+                                    {itemAnchor.anchorProductName && (
+                                      <span className="opacity-60 truncate">· {language === "lt" ? "geriausias atitikmuo:" : "best match:"} {itemAnchor.anchorProductName}</span>
+                                    )}
+                                  </div>
+                                )}
                                 {recalculatedResults.map((sr) => {
                                   const storeItem = sr.items.find((i) => i.itemName === item.itemName);
+                                  const hasClosestAlt = storeItem?.match?.status === "closest-alt";
                                   if (!storeItem || storeItem.candidates.length === 0) {
                                     return (
-                                      <div key={sr.storeId} className="flex items-center justify-between text-sm opacity-50">
+                                      <div key={sr.storeId} className="flex items-center justify-between text-sm opacity-40">
                                         <span className={`font-medium ${chainColor[sr.storeChain] || ""}`}>{sr.storeName}</span>
-                                        <span className="text-xs italic">{t("compare.notFound")}</span>
+                                        <span className="text-xs italic text-red-400">{language === "lt" ? "nerasta" : "not available"}</span>
                                       </div>
                                     );
+                                  }
+                                  // Show "not available" for stores where only closest-alt exists and no aligned match
+                                  if (hasClosestAlt && alignedStoreCandidates.every((x) => x.store.storeId !== sr.storeId)) {
+                                    // This store only has closest-alt — show it dimmed at the bottom
                                   }
                                   const selectedIdx = selectedCandidates[item.itemName]?.[sr.storeId] ?? 0;
                                   return (
@@ -1646,12 +1682,26 @@ export default function GroceryListDetailPage() {
                                         const lineCost = computeLineCost(c, item.quantity);
                                         const isSelected = ci === selectedIdx;
                                         const isPack = c.matchType === "pack";
+                                        const isClosestAlt = c.status === "closest-alt";
+                                        // Show separator before the first closest-alt candidate
+                                        const prevIsAligned = ci > 0 && storeItem.candidates[ci - 1].status !== "closest-alt";
                                         return (
+                                          <div key={c.productId}>
+                                            {isClosestAlt && prevIsAligned && (
+                                              <div className="flex items-center gap-2 my-1 opacity-50">
+                                                <div className="flex-1 h-px bg-border" />
+                                                <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                                                  {language === "lt" ? "artimiausi pakaitalai" : "closest alternatives"}
+                                                </span>
+                                                <div className="flex-1 h-px bg-border" />
+                                              </div>
+                                            )}
                                           <button
-                                            key={c.productId}
                                             onClick={() => selectAndAutoMatch(item.itemName, sr.storeId, ci)}
                                             onDoubleClick={() => setPreviewProductId(c.productId)}
                                             className={`w-full flex items-center gap-2 px-3 py-2 rounded text-left text-sm transition-colors ${
+                                              isClosestAlt ? "opacity-50 " : ""
+                                            }${
                                               isSelected
                                                 ? "bg-primary/10 border border-primary/30"
                                                 : "hover:bg-accent/50 border border-transparent"
@@ -1666,7 +1716,7 @@ export default function GroceryListDetailPage() {
                                             )}
                                             <div className="flex-1 min-w-0">
                                               <p className="text-sm truncate">{c.productName}</p>
-                                              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                              <div className="flex items-center gap-1 text-xs text-muted-foreground flex-wrap">
                                                 {c.brand && <span>{c.brand}</span>}
                                                 {c.brand && c.weightValue && <span>·</span>}
                                                 {c.weightValue && c.weightUnit && (
@@ -1675,6 +1725,11 @@ export default function GroceryListDetailPage() {
                                                 {isPack && (
                                                   <Badge variant="secondary" className="text-[10px] py-0 px-1 ml-1">
                                                     {item.quantity}-pack
+                                                  </Badge>
+                                                )}
+                                                {isClosestAlt && (
+                                                  <Badge variant="outline" className="text-[10px] py-0 px-1 ml-1 border-amber-300 text-amber-600">
+                                                    {language === "lt" ? "kita kategorija" : "diff. category"}
                                                   </Badge>
                                                 )}
                                               </div>
@@ -1713,6 +1768,7 @@ export default function GroceryListDetailPage() {
                                               </button>
                                             </div>
                                           </button>
+                                          </div>
                                         );
                                       })}
                                     </div>
@@ -1861,24 +1917,41 @@ export default function GroceryListDetailPage() {
                                     )}
                                     {storeResult && (
                                       <div className="mt-3 border-t pt-2 space-y-1">
-                                        {storeResult.items.map((item, i) => (
-                                          <div key={i} className="flex items-center justify-between text-xs gap-2">
-                                            <div className="flex-1 min-w-0">
-                                              <span className={item.match ? "" : "text-muted-foreground italic"}>
-                                                {item.match ? item.match.productName : item.itemName}
-                                              </span>
-                                              {item.match?.brand && (
-                                                <span className="text-muted-foreground ml-1">({item.match.brand})</span>
+                                        {storeResult.items.map((item, i) => {
+                                          const isClosestAlt = item.match?.status === "closest-alt";
+                                          const isUnavailable = !item.match;
+                                          return (
+                                          <div key={i} className={`flex items-center justify-between text-xs gap-2 ${isClosestAlt ? "opacity-50" : ""}`}>
+                                            <div className="flex-1 min-w-0 flex items-center gap-1 flex-wrap">
+                                              {isUnavailable ? (
+                                                <span className="text-red-400 italic">{item.itemName}</span>
+                                              ) : (
+                                                <span className={isClosestAlt ? "text-muted-foreground" : ""}>
+                                                  {item.match!.productName}
+                                                </span>
                                               )}
-                                              {item.match?.loyaltyPrice && item.match.loyaltyPrice < Math.min(item.match.price, item.match.salePrice ?? Infinity) && (
-                                                <CreditCard className="inline h-3 w-3 text-primary ml-1" />
+                                              {item.match?.brand && !isClosestAlt && (
+                                                <span className="text-muted-foreground">({item.match.brand})</span>
+                                              )}
+                                              {item.match?.loyaltyPrice && !isClosestAlt && item.match.loyaltyPrice < Math.min(item.match.price, item.match.salePrice ?? Infinity) && (
+                                                <CreditCard className="inline h-3 w-3 text-primary" />
+                                              )}
+                                              {isClosestAlt && (
+                                                <Badge variant="outline" className="text-[9px] py-0 px-1 border-amber-300 text-amber-600">
+                                                  {language === "lt" ? "kita kat." : "diff. cat."}
+                                                </Badge>
                                               )}
                                             </div>
-                                            <span className="font-medium shrink-0">
-                                              {item.match ? `${item.lineCost.toFixed(2)}€` : t("compare.notFound")}
+                                            <span className={`font-medium shrink-0 ${isUnavailable ? "text-red-400 italic" : isClosestAlt ? "text-muted-foreground line-through" : ""}`}>
+                                              {isUnavailable
+                                                ? (language === "lt" ? "nerasta" : "n/a")
+                                                : isClosestAlt
+                                                  ? "—"
+                                                  : `${item.lineCost.toFixed(2)}€`}
                                             </span>
                                           </div>
-                                        ))}
+                                          );
+                                        })}
                                       </div>
                                     )}
                                   </CardContent>
@@ -1944,9 +2017,12 @@ export default function GroceryListDetailPage() {
                                       </div>
                                     </div>
                                     <ul className="space-y-1.5">
-                                      {sr.items.map((item, i) => (
-                                        <li key={i} className="flex items-center gap-2 text-sm">
-                                          {item.match?.imageUrl && (
+                                      {sr.items.map((item, i) => {
+                                        const isClosestAlt = item.match?.status === "closest-alt";
+                                        const isUnavailable = !item.match;
+                                        return (
+                                        <li key={i} className={`flex items-center gap-2 text-sm ${isClosestAlt ? "opacity-50" : ""}`}>
+                                          {item.match?.imageUrl && !isClosestAlt && (
                                             <img
                                               src={item.match.imageUrl}
                                               alt=""
@@ -1954,27 +2030,34 @@ export default function GroceryListDetailPage() {
                                             />
                                           )}
                                           <div className="flex-1 min-w-0">
-                                            <span className={item.match ? "" : "text-muted-foreground italic line-through"}>
-                                              {item.match ? item.match.productName : item.itemName}
-                                            </span>
-                                            {item.match && (
-                                              <span className="text-xs text-muted-foreground ml-1">
-                                                {item.match.brand && `${item.match.brand}`}
-                                                {item.match.brand && item.match.weightValue && " · "}
-                                                {item.match.weightValue && item.match.weightUnit && `${item.match.weightValue}${item.match.weightUnit}`}
-                                              </span>
-                                            )}
-                                            {!item.match && (
-                                              <span className="ml-1 text-xs text-red-500">
-                                                {language === "lt" ? "nerasta" : "not available"}
+                                            {isUnavailable ? (
+                                              <span className="text-red-400 italic">{item.itemName} — {language === "lt" ? "nerasta" : "not available"}</span>
+                                            ) : isClosestAlt ? (
+                                              <div>
+                                                <span className="text-muted-foreground">{item.match!.productName}</span>
+                                                <Badge variant="outline" className="text-[9px] py-0 px-1 ml-1 border-amber-300 text-amber-600">
+                                                  {language === "lt" ? "kita kat." : "diff. cat."}
+                                                </Badge>
+                                              </div>
+                                            ) : (
+                                              <span>
+                                                {item.match!.productName}
+                                                {item.match && (
+                                                  <span className="text-xs text-muted-foreground ml-1">
+                                                    {item.match.brand && `${item.match.brand}`}
+                                                    {item.match.brand && item.match.weightValue && " · "}
+                                                    {item.match.weightValue && item.match.weightUnit && `${item.match.weightValue}${item.match.weightUnit}`}
+                                                  </span>
+                                                )}
                                               </span>
                                             )}
                                           </div>
-                                          <span className={`font-medium shrink-0 ${!item.match ? "text-muted-foreground" : ""}`}>
-                                            {item.match ? `${item.lineCost.toFixed(2)}€` : "—"}
+                                          <span className={`font-medium shrink-0 ${isUnavailable ? "text-red-400" : isClosestAlt ? "text-muted-foreground line-through" : ""}`}>
+                                            {isUnavailable ? "—" : isClosestAlt ? "—" : `${item.lineCost.toFixed(2)}€`}
                                           </span>
                                         </li>
-                                      ))}
+                                        );
+                                      })}
                                     </ul>
                                     {missingItems.length > 0 && (
                                       <div className="mt-2 pt-2 border-t">

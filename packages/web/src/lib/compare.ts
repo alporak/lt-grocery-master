@@ -1,5 +1,14 @@
 import { prisma } from "./db";
-import { normalizeText, buildFlexibleConditions, scoreRelevance, semanticSearch } from "./search";
+import {
+  normalizeText,
+  buildFlexibleConditions,
+  scoreRelevance,
+  semanticSearch,
+  buildIntentFromText,
+  productMatchesIntent,
+  categoryBonus,
+  type QueryIntent,
+} from "./search";
 import { haversineDistance } from "./distance";
 import { computeLineCost } from "./cost";
 export { computeLineCost } from "./cost";
@@ -13,6 +22,12 @@ interface CompareItem {
 
 // Units where qty > 1 means "find a multi-pack, not N single items"
 const PACK_UNITS = new Set(["pack", "bottle", "pcs"]);
+
+/** How well a per-store match aligns with the canonical anchor product. */
+export type MatchStatus =
+  | "aligned"      // same category as anchor / intent — include in totals
+  | "closest-alt"  // best available but different category — dim in UI, exclude from totals
+  | "unavailable"; // nothing found — show explicit "not available"
 
 interface StoreMatch {
   productId: number;
@@ -33,6 +48,8 @@ interface StoreMatch {
   /** "pack" = this product already covers the full quantity (a multi-pack).
    *  "unit" = single item, line cost = price × quantity. */
   matchType?: "pack" | "unit";
+  /** Alignment status relative to the anchor product / query intent. */
+  status?: MatchStatus;
 }
 
 interface StoreResult {
@@ -47,6 +64,17 @@ interface StoreResult {
   }>;
   totalCost: number;
   matchedCount: number;
+}
+
+/** Per-item anchor: the best unambiguous match found across all stores. */
+export interface ItemAnchor {
+  itemName: string;
+  anchorProductId: number;
+  anchorProductName: string;
+  anchorStoreId: number;
+  anchorStoreName: string;
+  category: string | null;
+  intent: QueryIntent;
 }
 
 interface SmartRecommendation {
@@ -77,6 +105,8 @@ export interface CompareResult {
     totalCost: number;
   };
   smartRecommendation?: SmartRecommendation[];
+  /** Anchor products — one per list item. Used by UI for anchor card + re-alignment. */
+  itemAnchors?: ItemAnchor[];
 }
 
 /**
@@ -140,29 +170,105 @@ export async function compareGroceryList(
       })
   );
 
+  // Build intent once per item (rule-based, cheap)
+  const intentMap = new Map<string, QueryIntent>();
+  for (const item of items) {
+    intentMap.set(item.itemName, buildIntentFromText(item.itemName));
+  }
+
+  // ── Anchor selection (with candidate cache to avoid double searches) ─────────
+  // For each item, search all stores once, cache candidates, then pick the best
+  // aligned result as the anchor. Per-store loop reuses this cache.
+  const anchorMap = new Map<string, { storeId: number; storeName: string; match: StoreMatch } | null>();
+  // candidatesCache[itemName][storeId] = candidates
+  const candidatesCache = new Map<string, Map<number, StoreMatch[]>>();
+
+  await Promise.all(
+    items.map(async (item) => {
+      const storeCache = new Map<number, StoreMatch[]>();
+      candidatesCache.set(item.itemName, storeCache);
+
+      if (pinnedResolved.has(item.itemName)) {
+        const pinned = pinnedResolved.get(item.itemName)!;
+        anchorMap.set(item.itemName, {
+          storeId: pinned.refStoreId,
+          storeName: stores.find((s) => s.id === pinned.refStoreId)?.name ?? "",
+          match: pinned.refMatch,
+        });
+        // Pre-populate cache for pinned items
+        for (const store of stores) {
+          if (store.id === pinned.refStoreId) {
+            storeCache.set(store.id, [{ ...pinned.refMatch, status: "aligned" as MatchStatus }]);
+          } else {
+            const similar = (pinned.similarByStore[store.id] ?? []).map((m) => ({
+              ...m,
+              status: "aligned" as MatchStatus,
+            }));
+            storeCache.set(store.id, similar);
+          }
+        }
+        return;
+      }
+
+      const intent = intentMap.get(item.itemName)!;
+      let bestAnchor: { storeId: number; storeName: string; match: StoreMatch; score: number } | null = null;
+
+      // Search all stores in parallel — cache results
+      await Promise.all(
+        stores.map(async (store) => {
+          const candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit, intent);
+          storeCache.set(store.id, candidates);
+          const aligned = candidates.filter((c) => c.status === "aligned" || c.status == null);
+          if (aligned.length > 0) {
+            const score = aligned[0].score ?? 0;
+            if (!bestAnchor || score > bestAnchor.score) {
+              bestAnchor = { storeId: store.id, storeName: store.name, match: aligned[0], score };
+            }
+          }
+        })
+      );
+
+      // If no aligned match anywhere, use the best any-status candidate as anchor
+      if (!bestAnchor) {
+        for (const store of stores) {
+          const cached = storeCache.get(store.id) ?? [];
+          if (cached.length > 0) {
+            bestAnchor = { storeId: store.id, storeName: store.name, match: cached[0], score: cached[0].score ?? 0 };
+            break;
+          }
+        }
+      }
+      anchorMap.set(item.itemName, bestAnchor ? { storeId: bestAnchor.storeId, storeName: bestAnchor.storeName, match: bestAnchor.match } : null);
+    })
+  );
+
   const storeResults: StoreResult[] = [];
 
   for (const store of stores) {
     const storeItems: StoreResult["items"] = [];
 
     for (const item of items) {
-      const pinned = pinnedResolved.get(item.itemName);
-      let candidates: StoreMatch[];
-      if (pinned) {
-        if (store.id === pinned.refStoreId) {
-          candidates = [pinned.refMatch];
-        } else {
-          candidates = pinned.similarByStore[store.id] ?? [];
-        }
-        // Fallback to text search if pinned lookup yielded nothing in this store
-        if (candidates.length === 0) {
-          candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit);
-        }
-      } else {
-        candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit);
+      const intent = intentMap.get(item.itemName)!;
+      // Retrieve cached candidates (populated during anchor selection phase)
+      let candidates: StoreMatch[] = candidatesCache.get(item.itemName)?.get(store.id) ?? [];
+
+      // If cache missed (shouldn't happen but safeguard), do a live search
+      if (candidates.length === 0 && !pinnedResolved.has(item.itemName)) {
+        candidates = await findCandidates(store.id, item.itemName, language, 5, item.quantity, item.unit, intent);
       }
-      const match = candidates.length > 0 ? candidates[0] : null;
-      const lineCost = match ? computeLineCost(match, item.quantity) : 0;
+
+      // Pick the best aligned candidate as the match; fall back to closest-alt only if
+      // no aligned candidate exists anywhere — mark it explicitly so the UI can dim it.
+      const alignedCandidates = candidates.filter((c) => c.status === "aligned" || c.status == null);
+      const match = alignedCandidates.length > 0
+        ? alignedCandidates[0]
+        : candidates.length > 0
+          ? { ...candidates[0], status: "closest-alt" as MatchStatus }
+          : null;
+
+      // Only count aligned matches toward the cost total — closest-alt is informational only
+      const isCountable = !match || match.status === "aligned" || match.status == null;
+      const lineCost = (match && isCountable) ? computeLineCost(match, item.quantity) : 0;
 
       storeItems.push({
         itemName: item.itemName,
@@ -172,7 +278,7 @@ export async function compareGroceryList(
       });
     }
 
-    const matchedCount = storeItems.filter((i) => i.match !== null).length;
+    const matchedCount = storeItems.filter((i) => i.match?.status === "aligned" || (i.match && i.match.status == null)).length;
     const totalCost = storeItems.reduce((sum, i) => sum + i.lineCost, 0);
 
     storeResults.push({
@@ -184,6 +290,32 @@ export async function compareGroceryList(
       matchedCount,
     });
   }
+
+  // Build itemAnchors for the response
+  const itemAnchors: ItemAnchor[] = items.map((item) => {
+    const anchor = anchorMap.get(item.itemName);
+    const intent = intentMap.get(item.itemName)!;
+    if (!anchor) {
+      return {
+        itemName: item.itemName,
+        anchorProductId: 0,
+        anchorProductName: "",
+        anchorStoreId: 0,
+        anchorStoreName: "",
+        category: intent.category,
+        intent,
+      };
+    }
+    return {
+      itemName: item.itemName,
+      anchorProductId: anchor.match.productId,
+      anchorProductName: anchor.match.productName,
+      anchorStoreId: anchor.storeId,
+      anchorStoreName: anchor.storeName,
+      category: intent.category,
+      intent,
+    };
+  });
 
   // Find cheapest single store (only among those that matched all items)
   const fullMatches = storeResults.filter(
@@ -238,6 +370,7 @@ export async function compareGroceryList(
       items: splitItems,
       totalCost: splitItems.reduce((sum, i) => sum + i.bestPrice, 0),
     },
+    itemAnchors,
   };
 
   // Smart recommendation: distance-aware scoring
@@ -316,6 +449,7 @@ async function findCandidates(
   limit: number = 5,
   quantity: number = 1,
   unit?: string,
+  intent?: QueryIntent,
 ): Promise<StoreMatch[]> {
   const isPackSearch = quantity > 1 && !!unit && PACK_UNITS.has(unit);
 
@@ -388,7 +522,7 @@ async function findCandidates(
   }
 
   // Search 2 (or only search): base item name
-  const baseCandidates = await _searchByName(storeId, itemName, language, limit * 2, seenIds);
+  const baseCandidates = await _searchByName(storeId, itemName, language, limit * 2, seenIds, intent);
   for (const c of baseCandidates) {
     unitCandidates.push({ ...c, matchType: isPackSearch ? "unit" : undefined });
   }
@@ -409,6 +543,9 @@ async function findCandidates(
 
 /**
  * Core name-based search (semantic + keyword fallback).
+ * When `intent` is provided, results that violate the intent's exclusion list are
+ * demoted to `status: "closest-alt"` rather than dropped entirely — so the UI can
+ * show "not available (closest: X)" instead of a silent wrong-category match.
  */
 async function _searchByName(
   storeId: number,
@@ -416,10 +553,11 @@ async function _searchByName(
   language: string,
   limit: number,
   seenIds: Set<number>,
+  intent?: QueryIntent,
 ): Promise<StoreMatch[]> {
   const candidates: StoreMatch[] = [];
 
-  const toMatch = (product: any, pr: any, score?: number): StoreMatch => ({
+  const toMatch = (product: any, pr: any, score?: number, status?: MatchStatus): StoreMatch => ({
     productId: product.id,
     productName: language === "en" ? product.nameEn || product.nameLt : product.nameLt,
     price: pr.regularPrice,
@@ -435,12 +573,15 @@ async function _searchByName(
     nameEn: product.nameEn ?? undefined,
     categoryLt: product.categoryLt ?? undefined,
     score,
+    status,
   });
 
   // Try semantic search first
   const semanticResults = await semanticSearch(itemName, limit * 3, [storeId]);
   if (semanticResults && semanticResults.length > 0) {
-    const validResults = semanticResults.filter((r) => r.score >= 0.4);
+    // Tighter threshold than before (was 0.4). Products below this are almost certainly
+    // wrong, so don't even evaluate them — the keyword fallback handles edge cases.
+    const validResults = semanticResults.filter((r) => r.score >= 0.52);
     if (validResults.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: validResults.map((r) => r.id) } },
@@ -448,8 +589,8 @@ async function _searchByName(
       });
       const productMap = new Map(products.map((p) => [p.id, p]));
 
-      // Combined score: embedding (60%) + keyword relevance (40%)
-      const combinedScored: Array<{ id: number; combined: number }> = [];
+      // Combined score: embedding (55%) + keyword relevance (35%) + category bonus (10%)
+      const combinedScored: Array<{ id: number; combined: number; intentOk: boolean }> = [];
       for (const sr of validResults) {
         const product = productMap.get(sr.id);
         if (!product) continue;
@@ -460,18 +601,24 @@ async function _searchByName(
           categoryLt: product.categoryLt,
           brand: product.brand,
         });
-        // Normalize kw score (typical max ~200) to 0–1
         const kwNorm = Math.min(kw / 200, 1);
-        const combined = sr.score * 0.6 + kwNorm * 0.4;
-        combinedScored.push({ id: sr.id, combined });
+        const catBonus = intent ? categoryBonus(intent, product) / 200 : 0;
+        const combined = sr.score * 0.55 + kwNorm * 0.35 + catBonus * 0.1;
+        const intentOk = intent ? productMatchesIntent(product, intent) : true;
+        combinedScored.push({ id: sr.id, combined, intentOk });
       }
-      combinedScored.sort((a, b) => b.combined - a.combined);
+      combinedScored.sort((a, b) => {
+        // Always surface intent-matching products first
+        if (a.intentOk !== b.intentOk) return a.intentOk ? -1 : 1;
+        return b.combined - a.combined;
+      });
 
-      for (const { id, combined } of combinedScored) {
+      for (const { id, combined, intentOk } of combinedScored) {
         if (seenIds.has(id)) continue;
         const product = productMap.get(id);
         if (product && product.priceRecords[0]) {
-          candidates.push(toMatch(product, product.priceRecords[0], combined));
+          const status: MatchStatus = intentOk ? "aligned" : "closest-alt";
+          candidates.push(toMatch(product, product.priceRecords[0], combined, status));
           seenIds.add(product.id);
         }
       }

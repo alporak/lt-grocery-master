@@ -19,161 +19,188 @@ const POLISH_MAP: Record<string, string> = {
   'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n', 'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
 };
 
+// ── Category taxonomy ────────────────────────────────────────────────────────
+// Used by buildIntentFromText() to infer what type of product the user wants.
+// When intent is known, productMatchesIntent() filters out wrong-category results
+// (e.g. "beef shoulder" must never match dog treats or bouillon cubes).
+
+export interface QueryIntent {
+  category: string | null;     // e.g. "meat/beef-cuts", "dairy/milk"
+  confidence: "high" | "low";  // high = at least one token mapped to a category
+  excludes: string[];           // category slugs that are incompatible with this intent
+  keywords: string[];           // normalized tokens from the original query
+}
+
+interface SynonymGroupDef {
+  terms: string[];
+  category: string;
+}
+
 // Lithuanian grocery synonym groups — searching any term finds all related products.
 // Each group includes: Lithuanian, English, Russian (transliterated), Ukrainian (transliterated), Polish terms.
-const SYNONYM_GROUPS: string[][] = [
+const SYNONYM_GROUP_DEFS: SynonymGroupDef[] = [
   // ── Poultry ──────────────────────────────────────────────────────────────────
-  ["vistiena", "visciena", "broileris", "broiler", "chicken", "paukstiena", "vist",
-   "kuritsa", "kurица", "kuryatina", "ptitsa"],                                    // RU: курица, UA: курятина
-  ["vistienos krut", "vistienos krutine", "chicken breast", "broilerio krutinele",
-   "broileriu krutinele", "krutineles file", "fileja",
-   "kurinaya grud", "filje"],
-  ["vistienos saunel", "chicken thigh", "saunelis", "paukstienos saunel", "bedryshko"],
-  ["vistienos sparn", "chicken wing", "sparnelis", "sparnel", "krilishko"],
-  ["kalakutiena", "turkey", "indikas", "indeika", "indeyka"],                      // turkey
+  { category: "meat/poultry", terms: ["vistiena", "visciena", "broileris", "broiler", "chicken", "paukstiena", "vist",
+    "kuritsa", "kurица", "kuryatina", "ptitsa"] },
+  { category: "meat/poultry/breast", terms: ["vistienos krut", "vistienos krutine", "chicken breast", "broilerio krutinele",
+    "broileriu krutinele", "krutineles file", "fileja",
+    "kurinaya grud", "filje"] },
+  { category: "meat/poultry/thigh", terms: ["vistienos saunel", "chicken thigh", "saunelis", "paukstienos saunel", "bedryshko"] },
+  { category: "meat/poultry/wing", terms: ["vistienos sparn", "chicken wing", "sparnelis", "sparnel", "krilishko"] },
+  { category: "meat/poultry/turkey", terms: ["kalakutiena", "turkey", "indikas", "indeika", "indeyka"] },
 
   // ── Meat ─────────────────────────────────────────────────────────────────────
-  ["kiauliena", "pork", "kiaul", "svinina", "wieprzowina"],                        // RU: свинина, PL: wieprzowina
-  ["jautiena", "beef", "jaut", "govyadina", "wolowina", "wołowina"],               // RU: говядина, PL: wołowina
-  ["aviena", "lamb", "baranina"],                                                   // RU: баранина
-  ["veršiena", "verstiena", "veal", "telyatina"],
-  ["triušiena", "rabbit", "krolik"],
-  ["malta mesa", "farsas", "minced", "mince", "ground meat", "malti",
-   "farsh", "mielone"],                                                             // RU: фарш, PL: mielone
-  ["desra", "desrele", "sausage", "desr", "kolbasa", "kielbasa"],                  // RU: колбаса, PL: kiełbasa
-  ["kumpi", "ham", "kumpis", "vetschina", "szynka"],                               // RU: ветчина, PL: szynka
-  ["slanine", "sonine", "bacon", "bekon"],
-  ["kepenys", "liver", "pecheн", "pechen", "watrobka"],
-  ["mesa", "meat", "myaso", "mieso"],
+  { category: "meat/pork-cuts", terms: ["kiauliena", "pork", "kiaul", "svinina", "wieprzowina"] },
+  { category: "meat/beef-cuts", terms: ["jautiena", "beef", "jaut", "govyadina", "wolowina", "wołowina"] },
+  { category: "meat/lamb-cuts", terms: ["aviena", "lamb", "baranina"] },
+  { category: "meat/veal", terms: ["veršiena", "verstiena", "veal", "telyatina"] },
+  { category: "meat/rabbit", terms: ["triušiena", "rabbit", "krolik"] },
+  { category: "meat/ground", terms: ["malta mesa", "farsas", "minced", "mince", "ground meat", "malti",
+    "farsh", "mielone"] },
+  { category: "meat/processed", terms: ["desra", "desrele", "sausage", "desr", "kolbasa", "kielbasa"] },
+  { category: "meat/processed", terms: ["kumpi", "ham", "kumpis", "vetschina", "szynka"] },
+  { category: "meat/processed", terms: ["slanine", "sonine", "bacon", "bekon"] },
+  { category: "meat/organs", terms: ["kepenys", "liver", "pecheн", "pechen", "watrobka"] },
+  { category: "meat", terms: ["mesa", "meat", "myaso", "mieso"] },
 
   // ── Fish & Seafood ────────────────────────────────────────────────────────────
-  ["lazda", "lasis", "lasisa", "salmon", "losos", "losos", "losos"],               // LT: lašiša
-  ["silke", "herring", "seledka"],                                                  // LT: silkė
-  ["menkė", "menke", "cod", "treska"],
-  ["tunas", "tuna", "tunets"],
-  ["krevetes", "krevetės", "shrimp", "prawn", "krevetki"],
-  ["zuvis", "fish", "ryba", "ryby"],                                                // LT: žuvis, RU: рыба
+  { category: "seafood/salmon", terms: ["lazda", "lasis", "lasisa", "salmon", "losos"] },
+  { category: "seafood/herring", terms: ["silke", "herring", "seledka"] },
+  { category: "seafood/fish", terms: ["menkė", "menke", "cod", "treska"] },
+  { category: "seafood/tuna", terms: ["tunas", "tuna", "tunets"] },
+  { category: "seafood/shrimp", terms: ["krevetes", "krevetės", "shrimp", "prawn", "krevetki"] },
+  { category: "seafood/fish", terms: ["zuvis", "fish", "ryba", "ryby"] },
 
   // ── Dairy ─────────────────────────────────────────────────────────────────────
-  ["pienas", "milk", "pien", "moloko", "mleko"],                                   // RU: молоко, PL: mleko
-  ["sviestas", "butter", "sviest", "maslo", "maslo", "maslo"],                     // RU: масло, PL: masło
-  ["suris", "cheese", "sur", "syr", "ser"],                                        // RU: сыр, PL: ser
-  ["varske", "cottage cheese", "varsk", "tvorog", "twarog"],                       // RU: творог, PL: twaróg
-  ["jogurtas", "yogurt", "yoghurt", "jogurt", "yogurt"],
-  ["grietine", "sour cream", "grietin", "grietinele",
-   "smetana", "smietana"],                                                          // RU: сметана, PL: śmietana
-  ["grietinėlė", "grietinele", "heavy cream", "whipping cream", "slivki"],         // RU: сливки
-  ["kefyras", "kefir", "kefyr"],
-  ["kiausiniai", "eggs", "egg", "kiausini", "yaytsa", "yayco", "jajka", "jajko"],  // RU: яйца, PL: jajka
+  { category: "dairy/milk", terms: ["pienas", "milk", "pien", "moloko", "mleko"] },
+  { category: "dairy/butter", terms: ["sviestas", "butter", "sviest", "maslo"] },
+  { category: "dairy/cheese", terms: ["suris", "cheese", "sur", "syr", "ser"] },
+  { category: "dairy/cottage-cheese", terms: ["varske", "cottage cheese", "varsk", "tvorog", "twarog"] },
+  { category: "dairy/yogurt", terms: ["jogurtas", "yogurt", "yoghurt", "jogurt"] },
+  { category: "dairy/sour-cream", terms: ["grietine", "sour cream", "grietin", "grietinele",
+    "smetana", "smietana"] },
+  { category: "dairy/cream", terms: ["grietinėlė", "grietinele", "heavy cream", "whipping cream", "slivki"] },
+  { category: "dairy/kefir", terms: ["kefyras", "kefir", "kefyr"] },
+  { category: "dairy/eggs", terms: ["kiausiniai", "eggs", "egg", "kiausini", "yaytsa", "yayco", "jajka", "jajko"] },
 
   // ── Bread / Bakery ────────────────────────────────────────────────────────────
-  ["duona", "bread", "duon", "khleb", "hleb", "chleb"],                            // RU: хлеб, PL: chleb
-  ["batonas", "baguette", "baton", "baton"],
-  ["bandele", "bun", "bandel", "bulochka", "bulka"],
-  ["pyragas", "cake", "pyrag", "pirog", "tort"],
-  ["sausainis", "biscuit", "cookie", "pechenie"],
-  ["kruasanas", "croissant"],
+  { category: "bakery/bread", terms: ["duona", "bread", "duon", "khleb", "hleb", "chleb"] },
+  { category: "bakery/baguette", terms: ["batonas", "baguette", "baton"] },
+  { category: "bakery/bun", terms: ["bandele", "bun", "bandel", "bulochka", "bulka"] },
+  { category: "bakery/cake", terms: ["pyragas", "cake", "pyrag", "pirog", "tort"] },
+  { category: "bakery/cookie", terms: ["sausainis", "biscuit", "cookie", "pechenie"] },
+  { category: "bakery/croissant", terms: ["kruasanas", "croissant"] },
 
   // ── Produce — Vegetables ──────────────────────────────────────────────────────
-  ["bulve", "potato", "bulves", "potatoes", "bulv",
-   "kartoshka", "kartofel", "ziemniaki"],                                           // RU: картошка, PL: ziemniaki
-  ["česnakas", "cesnakas", "garlic", "chesnok", "czosnek"],                        // RU: чеснок, PL: czosnek
-  ["svogūnas", "svogunas", "onion", "svoguna", "svogan",
-   "luk", "cebula"],                                                                // RU: лук, PL: cebula
-  ["morka", "carrot", "mork", "morkov", "marchew"],                                // RU: морковь, PL: marchew
-  ["pomidoras", "pomidorai", "tomato", "pomidor"],                                  // same in many langs
-  ["agurkas", "agurkai", "cucumber", "agurk", "ogurtsy", "ogurets", "ogurek"],     // RU: огурец
-  ["kopūstas", "kopustas", "cabbage", "kopust", "kapusta"],                        // RU/PL: капуста/kapusta
-  ["brokoliai", "broccoli", "brokoli"],
-  ["žiedinis kopūstas", "ziedinis kopustas", "cauliflower", "tsvetнaya kapusta", "kalafior"],
-  ["špinatai", "spinatai", "spinach", "shpinat", "szpinak"],
-  ["grybai", "mushroom", "griby", "grzyby"],                                        // RU: грибы, PL: grzyby
-  ["paprika", "pepper", "perts", "pieprz"],
-  ["cukinija", "zucchini", "courgette", "kabachok"],
-  ["baklažanas", "baklazan", "eggplant", "aubergine", "baklazan"],
-  ["salotos", "lettuce", "salad", "salot", "salat", "salata"],
-  ["alyvuogiu", "alyvuogiai", "olive", "alyv", "maslinы", "oliwki"],
-  ["kukurūzai", "kukurukai", "corn", "kukuruza", "kukurydza"],
-  ["žirneliai", "zirneliai", "peas", "goroshek", "groszek"],
-  ["pupelės", "pupeles", "beans", "fasol", "fasola"],
-  ["svogūnlaiškiai", "svogunlaiskai", "spring onion", "green onion", "zelyony luk"],
+  { category: "produce/potato", terms: ["bulve", "potato", "bulves", "potatoes", "bulv",
+    "kartoshka", "kartofel", "ziemniaki"] },
+  { category: "produce/garlic", terms: ["česnakas", "cesnakas", "garlic", "chesnok", "czosnek"] },
+  { category: "produce/onion", terms: ["svogūnas", "svogunas", "onion", "svoguna", "svogan",
+    "luk", "cebula"] },
+  { category: "produce/carrot", terms: ["morka", "carrot", "mork", "morkov", "marchew"] },
+  { category: "produce/tomato", terms: ["pomidoras", "pomidorai", "tomato", "pomidor"] },
+  { category: "produce/cucumber", terms: ["agurkas", "agurkai", "cucumber", "agurk", "ogurtsy", "ogurets", "ogurek"] },
+  { category: "produce/cabbage", terms: ["kopūstas", "kopustas", "cabbage", "kopust", "kapusta"] },
+  { category: "produce/broccoli", terms: ["brokoliai", "broccoli", "brokoli"] },
+  { category: "produce/cauliflower", terms: ["žiedinis kopūstas", "ziedinis kopustas", "cauliflower", "tsvetнaya kapusta", "kalafior"] },
+  { category: "produce/spinach", terms: ["špinatai", "spinatai", "spinach", "shpinat", "szpinak"] },
+  { category: "produce/mushroom", terms: ["grybai", "mushroom", "griby", "grzyby"] },
+  { category: "produce/pepper", terms: ["paprika", "pepper", "perts", "pieprz"] },
+  { category: "produce/zucchini", terms: ["cukinija", "zucchini", "courgette", "kabachok"] },
+  { category: "produce/eggplant", terms: ["baklažanas", "baklazan", "eggplant", "aubergine"] },
+  { category: "produce/lettuce", terms: ["salotos", "lettuce", "salad", "salot", "salat", "salata"] },
+  { category: "produce/olive", terms: ["alyvuogiu", "alyvuogiai", "olive", "alyv", "oliwki"] },
+  { category: "produce/corn", terms: ["kukurūzai", "kukurukai", "corn", "kukuruza", "kukurydza"] },
+  { category: "produce/peas", terms: ["žirneliai", "zirneliai", "peas", "goroshek", "groszek"] },
+  { category: "produce/beans", terms: ["pupelės", "pupeles", "beans", "fasol", "fasola"] },
+  { category: "produce/spring-onion", terms: ["svogūnlaiškiai", "svogunlaiskai", "spring onion", "green onion", "zelyony luk"] },
 
   // ── Produce — Fruit ───────────────────────────────────────────────────────────
-  ["obuolys", "obuoliai", "apple", "obuol", "yabloko", "jablko"],                  // RU: яблоко, PL: jabłko
-  ["kriaušė", "kriause", "pear", "grusha", "gruszka"],
-  ["bananas", "bananai", "banana", "banan"],
-  ["apelsinas", "apelsinai", "orange", "apelsin", "pomarantscha", "pomarancza"],
-  ["citrina", "citrinos", "lemon", "citrin", "limon"],
-  ["mandarinas", "mandarins", "mandarin", "tangerine", "mandarin"],
-  ["braškė", "braske", "braskes", "strawberry", "brask", "klubnika", "truskawka"],
-  ["vyšnia", "visnia", "cherry", "vishnya", "wisnia"],
-  ["vynuogės", "vynuoges", "grape", "vinograd", "winogrona"],
-  ["arbūzas", "arbuzas", "watermelon", "arbuz"],
-  ["melionas", "melon", "melon"],
-  ["ananasas", "pineapple", "ananas"],
-  ["avokadas", "avocado"],
-  ["mango"],
-  ["avietė", "aviete", "raspberry", "malina", "maliny"],
-  ["mėlynė", "melyne", "blueberry", "golubika", "borowka"],
+  { category: "produce/apple", terms: ["obuolys", "obuoliai", "apple", "obuol", "yabloko", "jablko"] },
+  { category: "produce/pear", terms: ["kriaušė", "kriause", "pear", "grusha", "gruszka"] },
+  { category: "produce/banana", terms: ["bananas", "bananai", "banana", "banan"] },
+  { category: "produce/orange", terms: ["apelsinas", "apelsinai", "orange", "apelsin", "pomarantscha", "pomarancza"] },
+  { category: "produce/lemon", terms: ["citrina", "citrinos", "lemon", "citrin", "limon"] },
+  { category: "produce/mandarin", terms: ["mandarinas", "mandarins", "mandarin", "tangerine"] },
+  { category: "produce/strawberry", terms: ["braškė", "braske", "braskes", "strawberry", "brask", "klubnika", "truskawka"] },
+  { category: "produce/cherry", terms: ["vyšnia", "visnia", "cherry", "vishnya", "wisnia"] },
+  { category: "produce/grape", terms: ["vynuogės", "vynuoges", "grape", "vinograd", "winogrona"] },
+  { category: "produce/watermelon", terms: ["arbūzas", "arbuzas", "watermelon", "arbuz"] },
+  { category: "produce/melon", terms: ["melionas", "melon"] },
+  { category: "produce/pineapple", terms: ["ananasas", "pineapple", "ananas"] },
+  { category: "produce/avocado", terms: ["avokadas", "avocado"] },
+  { category: "produce/mango", terms: ["mango"] },
+  { category: "produce/raspberry", terms: ["avietė", "aviete", "raspberry", "malina", "maliny"] },
+  { category: "produce/blueberry", terms: ["mėlynė", "melyne", "blueberry", "golubika", "borowka"] },
 
   // ── Beverages ─────────────────────────────────────────────────────────────────
-  ["vanduo", "water", "vand", "voda", "woda"],
-  ["gazuotas vanduo", "sparkling water", "mineral water", "mineralka", "mineralnaya voda", "woda gazowana"],
-  ["sultys", "juice", "sult", "sok", "sok"],                                        // RU/PL: сок/sok
-  ["alus", "beer", "pivo", "piwo"],                                                 // RU: пиво, PL: piwo
-  ["vynas", "wine", "vyn", "vino", "wino"],
-  ["kava", "coffee", "kav", "kofe", "kawa"],
-  ["arbata", "tea", "arbat", "chay", "herbata"],
-  ["limonadas", "lemonade", "limonad", "limonad"],
-  ["sultinys", "energy drink", "energetik", "energetikas"],
-  ["pienas kakava", "hot chocolate", "kakao", "kakao"],
+  { category: "beverages/water", terms: ["vanduo", "water", "vand", "voda", "woda"] },
+  { category: "beverages/sparkling-water", terms: ["gazuotas vanduo", "sparkling water", "mineral water", "mineralka", "mineralnaya voda", "woda gazowana"] },
+  { category: "beverages/juice", terms: ["sultys", "juice", "sult", "sok"] },
+  { category: "beverages/beer", terms: ["alus", "beer", "pivo", "piwo"] },
+  { category: "beverages/wine", terms: ["vynas", "wine", "vyn", "vino", "wino"] },
+  { category: "beverages/coffee", terms: ["kava", "coffee", "kav", "kofe", "kawa"] },
+  { category: "beverages/tea", terms: ["arbata", "tea", "arbat", "chay", "herbata"] },
+  { category: "beverages/lemonade", terms: ["limonadas", "lemonade", "limonad"] },
+  { category: "beverages/energy-drink", terms: ["energetik", "energetikas", "energy drink"] },
+  { category: "beverages/hot-chocolate", terms: ["pienas kakava", "hot chocolate", "kakao"] },
 
   // ── Staples ───────────────────────────────────────────────────────────────────
-  ["ryžiai", "ryziai", "rice", "ryzi", "ris", "ryz"],                              // RU: рис, PL: ryż
-  ["makaronai", "pasta", "makaron", "makarony", "makaron"],                         // RU: макароны
-  ["miltai", "flour", "milt", "muka", "maka"],                                     // RU: мука, PL: mąka
-  ["cukrus", "sugar", "cukr", "sakhar", "sакhar", "cukier"],                       // RU: сахар, PL: cukier
-  ["druska", "salt", "drusk", "sol", "sol"],                                        // RU: соль, PL: sól
-  ["aliejus", "oil", "aliej", "maslo rastitelnoye", "olej"],                        // vegetable oil
-  ["actas", "vinegar", "uksus", "ocet"],
-  ["pomidorų padažas", "pomidoru padazas", "tomato sauce", "tomatniy sous", "sos pomidorowy"],
-  ["kečupas", "ketchup", "ketchup"],
-  ["majonezas", "mayonnaise", "mayo", "mayonez", "majonez"],
-  ["medus", "honey", "myod", "miod"],
-  ["uogienė", "uogiene", "jam", "varene", "dzem"],
-  ["šokoladas", "sokoladas", "chocolate", "shokolad", "czekolada"],
-  ["avižos", "avizos", "oats", "oatmeal", "ovsyanka", "owsianka", "porridge"],
-  ["dribsniai", "cereal", "cornflakes", "lopya", "płatki"],
-  ["mielės", "mieles", "yeast", "drozhzhi", "drozdzе"],
-  ["kepimo milteliai", "baking powder", "razrikhitel"],
-  ["krakmolas", "starch", "krakmal", "skrobia"],
-  ["zeldiniai", "spices", "herbs", "spetsii", "przyprawy"],
-  ["pipiras", "black pepper", "chyorny perts", "pieprz czarny"],
-  ["lauro lapai", "lauro lapas", "bay leaf", "lavroviy list", "listek laurowy"],
+  { category: "pantry/rice", terms: ["ryžiai", "ryziai", "rice", "ryzi", "ris", "ryz"] },
+  { category: "pantry/pasta", terms: ["makaronai", "pasta", "makaron", "makarony"] },
+  { category: "pantry/flour", terms: ["miltai", "flour", "milt", "muka", "maka"] },
+  { category: "pantry/sugar", terms: ["cukrus", "sugar", "cukr", "sakhar", "cukier"] },
+  { category: "pantry/salt", terms: ["druska", "salt", "drusk", "sol"] },
+  { category: "pantry/oil", terms: ["aliejus", "oil", "aliej", "olej"] },
+  { category: "pantry/vinegar", terms: ["actas", "vinegar", "uksus", "ocet"] },
+  { category: "pantry/tomato-sauce", terms: ["pomidorų padažas", "pomidoru padazas", "tomato sauce", "tomatniy sous", "sos pomidorowy"] },
+  { category: "pantry/ketchup", terms: ["kečupas", "ketchup"] },
+  { category: "pantry/mayo", terms: ["majonezas", "mayonnaise", "mayo", "mayonez", "majonez"] },
+  { category: "pantry/honey", terms: ["medus", "honey", "myod", "miod"] },
+  { category: "pantry/jam", terms: ["uogienė", "uogiene", "jam", "varene", "dzem"] },
+  { category: "pantry/chocolate", terms: ["šokoladas", "sokoladas", "chocolate", "shokolad", "czekolada"] },
+  { category: "pantry/oats", terms: ["avižos", "avizos", "oats", "oatmeal", "ovsyanka", "owsianka", "porridge"] },
+  { category: "pantry/cereal", terms: ["dribsniai", "cereal", "cornflakes", "lopya"] },
+  { category: "pantry/yeast", terms: ["mielės", "mieles", "yeast", "drozhzhi"] },
+  { category: "pantry/baking-powder", terms: ["kepimo milteliai", "baking powder", "razrikhitel"] },
+  { category: "pantry/starch", terms: ["krakmolas", "starch", "krakmal", "skrobia"] },
+  { category: "pantry/spices", terms: ["zeldiniai", "spices", "herbs", "spetsii", "przyprawy"] },
+  { category: "pantry/spices", terms: ["pipiras", "black pepper", "chyorny perts", "pieprz czarny"] },
+  { category: "pantry/spices", terms: ["lauro lapai", "lauro lapas", "bay leaf", "lavroviy list", "listek laurowy"] },
+
+  // ── Bouillon / Broth — MUST stay in pantry, NOT meat ─────────────────────────
+  { category: "pantry/bouillon", terms: ["sultinys", "bouillon", "buljona", "broth", "buljons", "bujons"] },
 
   // ── Frozen / Convenience ──────────────────────────────────────────────────────
-  ["šaldytos daržovės", "saldytos darzoves", "frozen vegetables", "zamorozhennye ovoschi"],
-  ["pica", "pizza"],
-  ["pelmenys", "dumplings", "pelmeni", "pierogi"],
-  ["blyneliai", "pancakes", "bliny", "naleśniki"],
+  { category: "frozen/vegetables", terms: ["šaldytos daržovės", "saldytos darzoves", "frozen vegetables", "zamorozhennye ovoschi"] },
+  { category: "frozen/pizza", terms: ["pica", "pizza"] },
+  { category: "frozen/dumplings", terms: ["pelmenys", "dumplings", "pelmeni", "pierogi"] },
+  { category: "frozen/pancakes", terms: ["blyneliai", "pancakes", "bliny"] },
 
   // ── Dairy extras ─────────────────────────────────────────────────────────────
-  ["sūrelis", "surelis", "cheese snack", "glazirovaniy syrok", "serochok"],
-  ["gėrimas su pienu", "gerimas su pienu", "milk drink", "molochniy napitok"],
+  { category: "dairy/cheese-snack", terms: ["sūrelis", "surelis", "cheese snack", "glazirovaniy syrok"] },
+  { category: "dairy/milk", terms: ["gėrimas su pienu", "gerimas su pienu", "milk drink", "molochniy napitok"] },
 
-  // ── Household / Personal care ─────────────────────────────────────────────────
-  ["skalbimo", "detergent", "skalb", "skalbiklis", "stiralnoye sredstvo", "proszek do prania"],
-  ["indaplovių", "indaploviu", "dishwasher", "indaplov", "posudomoechnoe"],
-  ["tualetinis popierius", "toilet paper", "tualetini", "tualetnaya bumaga", "papier toaletowy"],
-  ["servetėlės", "servietkes", "napkins", "tissues", "salfetki", "serwetki"],
-  ["šampūnas", "sampunas", "shampoo", "shampun", "szampon"],
-  ["muilas", "soap", "mylo", "mydlo"],
-  ["dantų pasta", "dantu pasta", "toothpaste", "zubnaya pasta", "pasta do zebow"],
-  ["dezodorantas", "deodorant", "dezodorant"],
-  ["skutimosi", "razor", "britva"],
-  ["sauskelnės", "sauskelines", "diapers", "nappies", "pampersy", "pieluchy"],
-  ["ploviklis", "cleaning spray", "cleaner", "chistyaszcheye"],
+  // ── Household ─────────────────────────────────────────────────────────────────
+  { category: "household/detergent", terms: ["skalbimo", "detergent", "skalb", "skalbiklis", "stiralnoye sredstvo", "proszek do prania"] },
+  { category: "household/dishwasher", terms: ["indaplovių", "indaploviu", "dishwasher", "indaplov", "posudomoechnoe"] },
+  { category: "household/toilet-paper", terms: ["tualetinis popierius", "toilet paper", "tualetini", "tualetnaya bumaga", "papier toaletowy"] },
+  { category: "household/napkins", terms: ["servetėlės", "servietkes", "napkins", "tissues", "salfetki", "serwetki"] },
+  { category: "household/cleaner", terms: ["ploviklis", "cleaning spray", "cleaner", "chistyaszcheye"] },
+
+  // ── Personal care ─────────────────────────────────────────────────────────────
+  { category: "personal-care/shampoo", terms: ["šampūnas", "sampunas", "shampoo", "shampun", "szampon"] },
+  { category: "personal-care/soap", terms: ["muilas", "soap", "mylo", "mydlo"] },
+  { category: "personal-care/toothpaste", terms: ["dantų pasta", "dantu pasta", "toothpaste", "zubnaya pasta", "pasta do zebow"] },
+  { category: "personal-care/deodorant", terms: ["dezodorantas", "deodorant", "dezodorant"] },
+  { category: "personal-care/razor", terms: ["skutimosi", "razor", "britva"] },
+  { category: "personal-care/diaper", terms: ["sauskelnės", "sauskelines", "diapers", "nappies", "pampersy", "pieluchy"] },
 ];
+
+// Derived for backward compatibility — all code using SYNONYM_GROUPS or SYNONYM_MAP still works unchanged.
+const SYNONYM_GROUPS: string[][] = SYNONYM_GROUP_DEFS.map((g) => g.terms);
+
+// Map each term to its synonym group for O(1) lookup (unchanged from before).
 
 // Map each term to its synonym group for O(1) lookup
 export const SYNONYM_MAP = new Map<string, string[]>();
@@ -181,6 +208,200 @@ for (const group of SYNONYM_GROUPS) {
   for (const term of group) {
     SYNONYM_MAP.set(term.toLowerCase(), group);
   }
+}
+
+// Map each term → its category definition (for intent extraction)
+const TERM_CATEGORY_MAP = new Map<string, SynonymGroupDef>();
+for (const def of SYNONYM_GROUP_DEFS) {
+  for (const term of def.terms) {
+    TERM_CATEGORY_MAP.set(term.toLowerCase(), def);
+  }
+}
+
+// Categories whose presence in a product makes it incompatible with fresh-food intents.
+// Keyed by the problematic category prefix.
+const FOOD_INCOMPATIBLE_CATEGORIES = ["pet-food", "household", "personal-care"];
+
+// When intent is a fresh-food family, also exclude these pantry sub-categories
+// (e.g. "beef" should never match "Gallina Blanca Beef Bouillon").
+const FRESH_MEAT_EXCLUDES = ["pantry/bouillon", "pantry/sauce", "snacks", "pet-food", "household", "personal-care"];
+const FRESH_FOOD_EXCLUDES = ["pet-food", "household", "personal-care"];
+
+function buildExcludes(category: string): string[] {
+  const family = category.split("/")[0];
+  if (family === "meat" || family === "seafood") return [...FRESH_MEAT_EXCLUDES];
+  if (["dairy", "produce", "bakery"].includes(family)) return [...FRESH_FOOD_EXCLUDES];
+  if (family === "beverages") return [...FOOD_INCOMPATIBLE_CATEGORIES];
+  return [];
+}
+
+/**
+ * Derive search intent from free-text query (rule-based, deterministic).
+ * Returns the dominant category + exclusion list so callers can filter results.
+ */
+export function buildIntentFromText(itemName: string): QueryIntent {
+  const normalized = normalizeText(itemName);
+  const words = normalized.split(/\s+/).filter((w) => w.length >= 2);
+  const keywords = words;
+
+  const matchedDefs: SynonymGroupDef[] = [];
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const bigram = i < words.length - 1 ? `${word} ${words[i + 1]}` : null;
+
+    // Bigram first (more specific)
+    if (bigram && TERM_CATEGORY_MAP.has(bigram)) {
+      matchedDefs.push(TERM_CATEGORY_MAP.get(bigram)!);
+      i++;
+      continue;
+    }
+
+    // Direct match
+    if (TERM_CATEGORY_MAP.has(word)) {
+      matchedDefs.push(TERM_CATEGORY_MAP.get(word)!);
+      continue;
+    }
+
+    // Prefix match (e.g. "bulv" → "bulve/potato")
+    for (const [key, def] of TERM_CATEGORY_MAP) {
+      if (key.startsWith(word) && word.length >= 4) {
+        matchedDefs.push(def);
+        break;
+      }
+    }
+  }
+
+  if (matchedDefs.length === 0) {
+    return { category: null, confidence: "low", excludes: [], keywords };
+  }
+
+  // Pick the most specific (longest) category from matched defs
+  const sorted = [...matchedDefs].sort((a, b) => b.category.length - a.category.length);
+  const topCategory = sorted[0].category;
+  const excludes = buildExcludes(topCategory);
+
+  return { category: topCategory, confidence: "high", excludes, keywords };
+}
+
+/**
+ * Returns false if the product's category text signals it belongs to an excluded category.
+ * Used to filter semantic search results that are technically "similar" (e.g. beef bouillon
+ * when the user searched for beef shoulder).
+ */
+export function productMatchesIntent(
+  product: {
+    canonicalCategory?: string | null;
+    categoryLt?: string | null;
+    nameLt: string;
+    nameEn?: string | null;
+    brand?: string | null;
+  },
+  intent: QueryIntent,
+): boolean {
+  if (intent.excludes.length === 0) return true;
+
+  const haystack = [
+    product.canonicalCategory,
+    product.categoryLt,
+    product.nameEn,
+    product.brand,
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  const nameLower = product.nameLt.toLowerCase();
+
+  for (const excl of intent.excludes) {
+    const exclFamily = excl.split("/")[0];
+    switch (exclFamily) {
+      case "pet-food":
+        if (
+          haystack.includes("augintini") ||
+          haystack.includes("gyvunams") ||
+          haystack.includes("pet food") ||
+          haystack.includes("dog") ||
+          haystack.includes("cat food") ||
+          haystack.includes("bird food") ||
+          nameLower.includes("pedigree") ||
+          nameLower.includes("whiskas") ||
+          nameLower.includes("friskies") ||
+          nameLower.includes("purina") ||
+          nameLower.includes("dreamies") ||
+          nameLower.includes("sheba") ||
+          nameLower.includes("felix") ||
+          (haystack.includes("dog") && haystack.includes("treat"))
+        ) return false;
+        break;
+      case "pantry":
+        if (excl === "pantry/bouillon") {
+          if (
+            haystack.includes("buljona") ||
+            haystack.includes("sultinys") ||
+            haystack.includes("bouillon") ||
+            haystack.includes("buljons") ||
+            nameLower.includes("bouillon") ||
+            nameLower.includes("gallina blanca") ||
+            (nameLower.includes("knorr") && haystack.includes("broth"))
+          ) return false;
+        }
+        break;
+      case "snacks":
+        if (
+          (haystack.includes("snack") || haystack.includes("chip") || haystack.includes("uzkan")) &&
+          !haystack.includes("meat") && !haystack.includes("mesa")
+        ) return false;
+        break;
+      case "household":
+        if (
+          haystack.includes("household") ||
+          haystack.includes("detergent") ||
+          haystack.includes("namų apyvoka") ||
+          haystack.includes("skalbim")
+        ) return false;
+        break;
+      case "personal-care":
+        if (
+          haystack.includes("hygiene") ||
+          haystack.includes("higiena") ||
+          haystack.includes("personal care") ||
+          haystack.includes("šampūnas") ||
+          haystack.includes("shampoo")
+        ) return false;
+        break;
+    }
+  }
+  return true;
+}
+
+/**
+ * Category match bonus for scoreRelevance — products that explicitly sit in the
+ * expected category family score higher than off-category products that merely
+ * contain a shared keyword (e.g. "beef shoulder" → +30 for a product in Mėsa/Jautiena
+ * vs 0 for a product in Augintiniai/Šunys).
+ */
+export function categoryBonus(
+  intent: QueryIntent,
+  product: { canonicalCategory?: string | null; categoryLt?: string | null },
+): number {
+  if (!intent.category) return 0;
+  const family = intent.category.split("/")[0];
+  const catText = [product.canonicalCategory, product.categoryLt].filter(Boolean).join(" ").toLowerCase();
+
+  const FAMILY_SIGNALS: Record<string, string[]> = {
+    meat: ["mesa", "jautiena", "kiauliena", "paukstiena", "meat", "mėsa"],
+    seafood: ["zuvis", "fish", "seafood", "žuvis"],
+    dairy: ["pienas", "dairy", "milk", "suris", "jogurt"],
+    produce: ["darzeoves", "vaisiai", "produce", "darzoves", "fresh"],
+    bakery: ["duona", "kepin", "bakery", "bread"],
+    pantry: ["pantry", "bakalea", "staples"],
+    beverages: ["gerimai", "beverage", "drink"],
+    frozen: ["saldyt", "frozen", "saldyti"],
+    household: ["household", "namų"],
+    "personal-care": ["higiena", "hygiene"],
+  };
+
+  const signals = FAMILY_SIGNALS[family] ?? [];
+  if (signals.some((s) => catText.includes(s))) return 30;
+  return 0;
 }
 
 /**
