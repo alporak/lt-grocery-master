@@ -1,23 +1,26 @@
+
 #!/usr/bin/env python3
 """
-Quick test: send the same 3 products to all 4 configured providers and compare results.
+Quick test: send the same 3 products to all configured providers and compare results.
 Run from: packages/embedder/
 Usage: python test_providers.py
 """
 import asyncio, json, os, time
 from dotenv import load_dotenv
 import httpx
+from google import genai
 
 load_dotenv("../../.env")
 
-PROVIDERS = [
-    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://api.groq.com/openai/v1/chat/completions",        "model": "llama-3.3-70b-versatile",               "json_mode": True},
-    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY",  "url": "https://openrouter.ai/api/v1/chat/completions",          "model": "meta-llama/llama-3.3-70b-instruct:free", "json_mode": False},
-    {"name": "NVIDIA NIM", "env": "NVIDIA_API_KEY",      "url": "https://integrate.api.nvidia.com/v1/chat/completions",   "model": "meta/llama-3.3-70b-instruct",            "json_mode": False},
-    {"name": "GitHub",     "env": "GITHUB_TOKEN",        "url": "https://models.inference.ai.azure.com/chat/completions", "model": "Meta-Llama-3.1-405B-Instruct",           "json_mode": True},
+PROVIDERS =[
+    {"name": "Gemini 3.1 Flash Lite", "env": "GEMINI_API_KEY", "is_gemini": True, "model": "gemini-3.1-flash-lite-preview", "json_mode": True},
+    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://api.groq.com/openai/v1/chat/completions",        "model": "llama-3.3-70b-versatile",               "json_mode": True, "is_gemini": False},
+    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY",  "url": "https://openrouter.ai/api/v1/chat/completions",          "model": "meta-llama/llama-3.3-70b-instruct:free", "json_mode": False, "is_gemini": False},
+    {"name": "NVIDIA NIM", "env": "NVIDIA_API_KEY",      "url": "https://integrate.api.nvidia.com/v1/chat/completions",   "model": "meta/llama-3.3-70b-instruct",            "json_mode": False, "is_gemini": False},
+    {"name": "GitHub",     "env": "GITHUB_TOKEN",        "url": "https://models.inference.ai.azure.com/chat/completions", "model": "Meta-Llama-3.1-405B-Instruct",           "json_mode": True, "is_gemini": False},
 ]
 
-TEST_PRODUCTS = [
+TEST_PRODUCTS =[
     {"id": 1, "nameLt": "Rokiškio pienas 2.5% 1L", "storeCategory": "Pieno produktai"},
     {"id": 2, "nameLt": "IKI vištienos filė su česnaku 500g", "storeCategory": "Mėsos gaminiai"},
     {"id": 3, "nameLt": "ALMA gazuotas vanduo citrina 1.5L", "storeCategory": "Gėrimai"},
@@ -45,11 +48,30 @@ USER_MSG = "Enrich these products:\n" + "\n".join(
     for i, p in enumerate(TEST_PRODUCTS)
 )
 
-
 async def call_provider(provider: dict) -> dict:
     key = os.getenv(provider["env"])
     if not key:
         return {"name": provider["name"], "error": "No API key", "elapsed": 0}
+
+    start = time.time()
+    
+    if provider.get("is_gemini"):
+        try:
+            client = genai.Client(api_key=key)
+            resp = await client.aio.models.generate_content(
+                model=provider["model"],
+                contents=USER_MSG,
+                config=genai.types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                )
+            )
+            elapsed = round(time.time() - start, 2)
+            parsed = json.loads(resp.text)
+            return {"name": provider["name"], "elapsed": elapsed, "results": parsed.get("results", [])}
+        except Exception as e:
+            return {"name": provider["name"], "error": str(e), "elapsed": round(time.time() - start, 2)}
 
     headers = {
         "Authorization": f"Bearer {key}",
@@ -61,7 +83,7 @@ async def call_provider(provider: dict) -> dict:
 
     payload = {
         "model": provider["model"],
-        "messages": [
+        "messages":[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_MSG},
         ],
@@ -71,7 +93,6 @@ async def call_provider(provider: dict) -> dict:
     if provider["json_mode"]:
         payload["response_format"] = {"type": "json_object"}
 
-    start = time.time()
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(provider["url"], json=payload, headers=headers)
@@ -79,17 +100,15 @@ async def call_provider(provider: dict) -> dict:
         if resp.status_code != 200:
             return {"name": provider["name"], "error": f"HTTP {resp.status_code}: {resp.text[:200]}", "elapsed": elapsed}
         raw = resp.json()["choices"][0]["message"]["content"]
-        # strip markdown fences if present
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
         parsed = json.loads(raw)
-        return {"name": provider["name"], "elapsed": elapsed, "results": parsed.get("results", [])}
+        return {"name": provider["name"], "elapsed": elapsed, "results": parsed.get("results",[])}
     except Exception as e:
         return {"name": provider["name"], "error": str(e), "elapsed": round(time.time() - start, 2)}
-
 
 async def main():
     print(f"Testing {len(PROVIDERS)} providers with {len(TEST_PRODUCTS)} products...\n")
@@ -107,9 +126,9 @@ async def main():
             continue
 
         print(f"{'='*60}")
-        print(f"  {name}  [{elapsed}s]")
+        print(f"  {name}[{elapsed}s]")
         print(f"{'='*60}")
-        results = resp.get("results", [])
+        results = resp.get("results",[])
         for i, product in enumerate(TEST_PRODUCTS):
             print(f"\n  Product {i+1}: {product['nameLt']}")
             if i < len(results):
@@ -121,6 +140,5 @@ async def main():
             else:
                 print("    (no result)")
         print()
-
 
 asyncio.run(main())

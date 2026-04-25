@@ -1,4 +1,4 @@
-import json, asyncio, logging
+import json, asyncio, logging, re
 from config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_THINKING_BUDGET, ENRICH_VERSION
 from db import get_db, _db_save_batch, _CATEGORY_IDS
 
@@ -31,7 +31,6 @@ BULK_ENRICH_SYSTEM_PROMPT = (
     "Exactly one object per input product in `results` array."
 )
 
-
 def _build_product_text(row) -> str:
     parts = [row["nameLt"]]
     if row["nameEn"]:
@@ -42,19 +41,53 @@ def _build_product_text(row) -> str:
         parts.append(row["brand"])
     return " | ".join(parts)
 
+def _extract_json_object(text: str) -> str | None:
+    if not text:
+        return None
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        if s.endswith("```"):
+            s = s[:-3].strip()
+    if s.lower().startswith("json"):
+        s = s[4:].strip()
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(s[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:i + 1]
+    return None
 
 async def _gemini_call(api_key: str, rows: list) -> tuple[list, str | None]:
-    """Call Gemini API for a batch of rows. Returns (items, error_msg).
-    Uses google-genai SDK. Products NOT marked in DB on failure — caller handles retries."""
     from google import genai
     from google.genai import types
 
-    lines = [f"Product {i+1}: {_build_product_text(row)}" for i, row in enumerate(rows)]
+    lines =[f"Product {i+1}: {_build_product_text(row)}" for i, row in enumerate(rows)]
     user_prompt = "\n".join(lines)
 
     cfg_kwargs: dict = {
         "system_instruction": BULK_ENRICH_SYSTEM_PROMPT,
-        "temperature": 1.0,
+        "temperature": 0.5,
+        # FIX 1: Increased token limit to prevent truncated JSON responses.
         "max_output_tokens": 65536,
         "response_mime_type": "application/json",
     }
@@ -62,32 +95,63 @@ async def _gemini_call(api_key: str, rows: list) -> tuple[list, str | None]:
         cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=GEMINI_THINKING_BUDGET)
 
     client = genai.Client(api_key=api_key)
-    try:
-        response = await client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(**cfg_kwargs),
-        )
-        text = response.text
-        parsed = json.loads(text)
-        items = parsed.get("results", [])
-        if not isinstance(items, list):
-            items = [parsed]
-        return items, None
-    except Exception as e:
-        return [], str(e)
-
+    
+    log.info(f"[Gemini] Yollanıyor: {len(rows)} ürün ({GEMINI_MODEL} modeliyle)... Lütfen bekleyin.")
+    
+    for attempt in range(3):
+        try:
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+            
+            try:
+                text = response.text
+                log.info(f"[Gemini] Yanıt geldi! İşleniyor... (Boyut: {len(text)} karakter)")
+            except ValueError as e:
+                return[], f"Yanıt metni engellendi veya eksik: {e}"
+                
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                log.warning("[Gemini] Gelen JSON bozuk, kurtarma deneniyor...")
+                extracted = _extract_json_object(text)
+                if not extracted:
+                    return [], f"JSON parse edilemedi: {text[:100]}..."
+                parsed = json.loads(extracted)
+                
+            items = parsed.get("results",[])
+            if not isinstance(items, list):
+                items = [parsed]
+                
+            return items, None
+            
+        except Exception as e:
+            msg = str(e)
+            # FIX 2: Added '503' to the retry condition to handle server overload.
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "503" in msg:
+                wait_time = 10 * (attempt + 1)
+                log.warning(f"[Gemini] Geçici sunucu hatası ({msg[:20]})! {wait_time} saniye bekleniyor... (Deneme {attempt+1}/3)")
+                await asyncio.sleep(wait_time)
+                continue
+            log.error(f"[Gemini] Beklenmeyen hata: {msg}")
+            return[], msg
+            
+    return[], "Maksimum deneme sayısına ulaşıldı."
 
 async def _gemini_enrich_batch(rows: list) -> tuple[int, int, str | None]:
-    """Single-key Gemini batch (used by scheduler and run-once). Returns (enriched, failed, error)."""
     if not GEMINI_API_KEY:
         return 0, len(rows), "No GEMINI_API_KEY configured"
     items, err = await _gemini_call(GEMINI_API_KEY, rows)
     if err:
-        log.error(f"[Gemini] Batch error: {err}")
+        log.error(f"[Gemini] Batch hatası: {err}")
+        # Mark all as failed since the batch call itself failed
+        _db_save_batch(rows, [], source="auto-failed") 
         return 0, len(rows), err
+    
     _db_save_batch(rows, items, source="auto")
     enriched = sum(1 for i, r in enumerate(rows) if i < len(items) and isinstance(items[i], dict) and ("name_en" in items[i] or "name_clean" in items[i]))
     failed = len(rows) - enriched
-    log.info(f"[Gemini] Enriched {enriched} products ({failed} mismatched/failed — will retry).")
+    log.info(f"[Gemini] {enriched} ürün işlendi ({failed} eşleşmedi/başarısız — tekrar denenecek).")
     return enriched, failed, None

@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/components/i18n-provider";
-import { AdBanner } from "@/components/ads/AdSlot";
+import { AdBanner, AdSponsoredRow } from "@/components/ads/AdSlot";
 import { addProductToList } from "@/lib/addProductToList";
 import {
   getWatchedProducts,
@@ -321,10 +321,10 @@ function SearchPageInner() {
               heading={`${t("search.matchingProducts")} · ${total}`}
               className="[&_[cmdk-group-heading]]:px-4 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
             >
-              {results.map((r) => {
+              {results.flatMap((r, idx) => {
                 const name = language === "en" ? r.nameEn || r.nameLt : r.nameLt;
                 const chain = r.store.chain.toUpperCase();
-                return (
+                const item = (
                   <Command.Item
                     key={r.id}
                     value={`product:${r.id}:${name}`}
@@ -364,6 +364,10 @@ function SearchPageInner() {
                     <span className="font-mono text-[9px] text-muted-foreground bg-muted rounded px-1 py-0.5">↵</span>
                   </Command.Item>
                 );
+                if ((idx + 1) % 5 === 0) {
+                  return [item, <div key={`ad-${idx}`} className="px-3 py-1"><AdSponsoredRow slotId={`search-row-${idx}`} /></div>];
+                }
+                return [item];
               })}
             </Command.Group>
           )}

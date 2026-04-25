@@ -41,6 +41,7 @@ import { BrandPickerModal } from "@/components/BrandPickerModal";
 import { ProductPreviewModal } from "@/components/ProductPreviewModal";
 import { getPreferredBrand, getBrandPreferences } from "@/lib/brandPreferences";
 import { matchesDietaryFilter, type DietaryFilter } from "@/lib/dietaryTags";
+import { AdSideRail, AdBanner } from "@/components/ads/AdSlot";
 
 interface Suggestion {
   id: number;
@@ -797,7 +798,8 @@ export default function GroceryListDetailPage() {
   const hasProductSuggestions = Object.keys(productSuggestions).length > 0;
 
   return (
-    <div className="space-y-4">
+    <div className="lg:flex lg:gap-6 lg:items-start">
+    <div className="flex-1 space-y-4">
       {/* Header: back + inline-editable title */}
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="icon" onClick={() => router.back()}>
@@ -980,7 +982,7 @@ export default function GroceryListDetailPage() {
                             className="flex-1 text-left px-3 py-2 text-sm hover:bg-accent/50 flex items-center gap-2 min-w-0"
                           >
                             <div className="flex-1 min-w-0">
-                              <p className="font-medium truncate">{s.name}</p>
+                              <p className="font-medium truncate">{language === "lt" ? s.name : (s.nameEn || s.name)}</p>
                               <p className="text-xs text-muted-foreground">
                                 {s.store}
                                 {s.brand && <span className="ml-1 text-primary/70">· {s.brand}</span>}
@@ -1121,7 +1123,13 @@ export default function GroceryListDetailPage() {
               ) : (
                 <ul className="divide-y">
                   {list.items.map((item, index) => (
-                    <li key={index} className="flex items-center gap-3 px-4 py-3">
+                    <li key={index}>
+                    {index === 5 && (
+                      <div className="px-3 py-2 lg:hidden">
+                        <AdBanner small slotId="list-items-mobile" />
+                      </div>
+                    )}
+                    <div className="flex items-center gap-3 px-4 py-3">
                       <button
                         onClick={() => toggleCheck(index)}
                         className={`shrink-0 w-5 h-5 rounded border flex items-center justify-center transition-colors ${
@@ -1186,6 +1194,7 @@ export default function GroceryListDetailPage() {
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
+                    </div>
                     </li>
                   ))}
                 </ul>
@@ -1404,7 +1413,7 @@ export default function GroceryListDetailPage() {
                                 )}
                               </div>
                             )}
-                            <p className="text-xs font-medium leading-snug mt-1 line-clamp-2">{c.name}</p>
+                            <p className="text-xs font-medium leading-snug mt-1 line-clamp-2">{language === "lt" ? c.name : (c.nameEn || c.name)}</p>
                             {c.brand && (
                               <p className="text-[10px] text-muted-foreground mt-0.5">{c.brand}</p>
                             )}
@@ -1443,7 +1452,7 @@ export default function GroceryListDetailPage() {
                                   onClick={() => setPreviewProductId(best.productId)}
                                   title="Preview"
                                 >
-                                  <span className="font-medium truncate">{best.productName}</span>
+                                  <span className="font-medium truncate">{language === "lt" ? best.productName : (best.nameEn || best.productName)}</span>
                                   {best.brand && (
                                     <span className="text-muted-foreground shrink-0">· {best.brand}</span>
                                   )}
@@ -1527,6 +1536,68 @@ export default function GroceryListDetailPage() {
 
               {recalculatedResults && (
                 <div className="space-y-6">
+                  {/* Savings hero */}
+                  {recalculatedResults.length >= 2 && (() => {
+                    const costs = recalculatedResults.map((s) => s.totalCost);
+                    const maxCost = Math.max(...costs);
+                    const minCost = Math.min(...costs);
+                    const saved = maxCost - minCost;
+                    if (saved < 0.01) return null;
+                    return (
+                      <div className="rounded-xl bg-primary/10 border border-primary/20 p-4 text-center">
+                        <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                          {language === "lt" ? "Galima sutaupyti iki" : "You could save up to"}
+                        </p>
+                        <p className="text-4xl font-bold text-primary">{saved.toFixed(2)}€</p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {language === "lt" ? "palyginus su brangiausiu parduotuvu" : "vs most expensive store"}
+                        </p>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Biggest per-item savings */}
+                  {recalculatedResults.length >= 2 && (() => {
+                    const itemSavings = list.items.map((li) => {
+                      const prices = recalculatedResults
+                        .map((sr) => sr.items.find((i) => i.itemName === li.itemName))
+                        .filter((si) => si?.match && si.lineCost > 0)
+                        .map((si) => si!.lineCost);
+                      if (prices.length < 2) return null;
+                      const best = Math.min(...prices);
+                      const worst = Math.max(...prices);
+                      const saving = worst - best;
+                      const bestStore = recalculatedResults.find((sr) => {
+                        const si = sr.items.find((i) => i.itemName === li.itemName);
+                        return si && si.lineCost === best;
+                      });
+                      return saving > 0.005 ? { itemName: li.itemName, saving, bestStore: bestStore?.storeName, bestChain: bestStore?.storeChain } : null;
+                    }).filter(Boolean) as { itemName: string; saving: number; bestStore?: string; bestChain?: string }[];
+                    const top = itemSavings.sort((a, b) => b.saving - a.saving).slice(0, 4);
+                    if (top.length === 0) return null;
+                    return (
+                      <Card>
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-sm flex items-center gap-2">
+                            <Tag className="h-4 w-4 text-primary" />
+                            {language === "lt" ? "Didžiausias sutaupymas" : "Biggest savings"}
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent className="space-y-2">
+                          {top.map((s) => (
+                            <div key={s.itemName} className="flex items-center justify-between gap-2 text-sm">
+                              <span className="truncate flex-1">{s.itemName}</span>
+                              {s.bestStore && (
+                                <span className={`text-xs font-medium shrink-0 ${chainColor[s.bestChain ?? ""] || "text-muted-foreground"}`}>{s.bestStore}</span>
+                              )}
+                              <span className="font-semibold text-green-600 dark:text-green-400 shrink-0">-{s.saving.toFixed(2)}€</span>
+                            </div>
+                          ))}
+                        </CardContent>
+                      </Card>
+                    );
+                  })()}
+
                   {/* Section 1: Item Matching */}
                   <Card>
                     <CardHeader className="pb-3">
@@ -2116,6 +2187,10 @@ export default function GroceryListDetailPage() {
                       </Tabs>
                     </CardContent>
                   </Card>
+                  {/* Ad after recommendations */}
+                  <div className="lg:hidden">
+                    <AdBanner small slotId="compare-mobile-bottom" />
+                  </div>
                 </div>
               )}
             </>
@@ -2204,6 +2279,67 @@ export default function GroceryListDetailPage() {
           }}
         />
       )}
+    </div>
+
+    {/* Desktop right sidebar — store totals + ad */}
+    <aside className="hidden lg:flex flex-col gap-4 w-72 shrink-0 sticky top-20">
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">{language === "lt" ? "Kainų suvestinė" : "Store totals"}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          {recalculatedResults ? (
+            [...recalculatedResults]
+              .sort((a, b) => a.totalCost - b.totalCost)
+              .map((sr, idx) => (
+                <div key={sr.storeId} className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {idx === 0 && <span className="text-primary">🏆</span>}
+                    <span className={`font-medium truncate ${chainColor[sr.storeChain] || ""}`}>{sr.storeName}</span>
+                    <span className="text-[10px] text-muted-foreground shrink-0">{sr.matchedCount}/{itemCount}</span>
+                  </div>
+                  <span className="font-semibold shrink-0">{sr.totalCost.toFixed(2)}€</span>
+                </div>
+              ))
+          ) : (
+            <p className="text-xs text-muted-foreground py-2 text-center">
+              {itemCount > 0
+                ? (language === "lt" ? "Eikite į 'Palyginti' kad pamatytumėte kainas" : "Go to Compare tab to see prices")
+                : (language === "lt" ? "Pridėkite prekių" : "Add items to compare")}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+      <AdSideRail slotId="list-siderail" />
+    </aside>
+
+    {/* Mobile sticky bottom bar */}
+    {itemCount > 0 && (
+      <div className="lg:hidden fixed bottom-16 inset-x-0 z-40 border-t bg-card/95 backdrop-blur-sm px-4 py-3 flex items-center justify-between gap-3">
+        <div className="text-sm min-w-0">
+          {cheapestRecalc ? (
+            <>
+              <span className="text-muted-foreground">{language === "lt" ? "Geriausia: " : "Best: "}</span>
+              <span className="font-bold">{cheapestRecalc.totalCost.toFixed(2)}€</span>
+              <span className="text-muted-foreground text-xs ml-1 truncate">@ {cheapestRecalc.storeName}</span>
+            </>
+          ) : (
+            <span className="text-muted-foreground">{itemCount} {language === "lt" ? "prekė(-ių)" : `item${itemCount !== 1 ? "s" : ""}`}</span>
+          )}
+        </div>
+        <Button
+          size="sm"
+          className="shrink-0 gap-1.5"
+          onClick={() => {
+            setActiveTab("compare");
+            if (!compareResult && !comparing) comparePrices();
+          }}
+        >
+          <Scale className="h-3.5 w-3.5" />
+          {language === "lt" ? "Palyginti →" : "Compare →"}
+        </Button>
+      </div>
+    )}
     </div>
   );
 }

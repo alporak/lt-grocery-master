@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/components/i18n-provider";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Bell, BellOff } from "lucide-react";
 import Link from "next/link";
 import {
   LineChart,
@@ -19,6 +19,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
+import { AdBanner, AdSideRail } from "@/components/ads/AdSlot";
 
 interface PriceRecord {
   id: number;
@@ -71,6 +72,10 @@ export default function ProductDetailPage() {
   const { t, language } = useI18n();
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [days, setDays] = useState(90);
+  const [watched, setWatched] = useState(false);
+  const [watchTargets, setWatchTargets] = useState<Record<string, number>>({});
+  const [showTargetInput, setShowTargetInput] = useState(false);
+  const [targetInputValue, setTargetInputValue] = useState("");
 
   useEffect(() => {
     if (!params.id) return;
@@ -79,6 +84,55 @@ export default function ProductDetailPage() {
       .then(setProduct)
       .catch(() => {});
   }, [params.id, days]);
+
+  useEffect(() => {
+    if (!params.id) return;
+    const watchedList: number[] = JSON.parse(localStorage.getItem("watchedProducts") || "[]");
+    setWatched(watchedList.includes(Number(params.id)));
+    const targets: Record<string, number> = JSON.parse(localStorage.getItem("watchTargets") || "{}");
+    setWatchTargets(targets);
+  }, [params.id]);
+
+  const productId = String(params.id);
+
+  const handleWatchClick = () => {
+    if (watched) return; // already watched — edit handled separately
+    setShowTargetInput(true);
+  };
+
+  const handleWatchSave = () => {
+    const target = parseFloat(targetInputValue);
+    const watchedList: number[] = JSON.parse(localStorage.getItem("watchedProducts") || "[]");
+    if (!watchedList.includes(Number(productId))) {
+      watchedList.push(Number(productId));
+      localStorage.setItem("watchedProducts", JSON.stringify(watchedList));
+    }
+    if (!isNaN(target) && target > 0) {
+      const targets: Record<string, number> = JSON.parse(localStorage.getItem("watchTargets") || "{}");
+      targets[productId] = target;
+      localStorage.setItem("watchTargets", JSON.stringify(targets));
+      setWatchTargets(targets);
+    }
+    setWatched(true);
+    setShowTargetInput(false);
+    setTargetInputValue("");
+  };
+
+  const handleWatchSkip = () => {
+    const watchedList: number[] = JSON.parse(localStorage.getItem("watchedProducts") || "[]");
+    if (!watchedList.includes(Number(productId))) {
+      watchedList.push(Number(productId));
+      localStorage.setItem("watchedProducts", JSON.stringify(watchedList));
+    }
+    setWatched(true);
+    setShowTargetInput(false);
+    setTargetInputValue("");
+  };
+
+  const handleWatchEditOpen = () => {
+    setTargetInputValue(watchTargets[productId] ? String(watchTargets[productId]) : "");
+    setShowTargetInput(true);
+  };
 
   if (!product) {
     return (
@@ -134,6 +188,81 @@ export default function ProductDetailPage() {
                     </Badge>
                   )}
                 </div>
+              </div>
+              {/* Watch / price alert */}
+              <div className="flex flex-col items-end gap-2 shrink-0">
+                {watched ? (
+                  <div className="flex flex-col items-end gap-1">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="gap-1.5"
+                      disabled
+                    >
+                      <Bell className="h-4 w-4 text-primary" />
+                      Watching
+                    </Button>
+                    {watchTargets[productId] && !showTargetInput && (
+                      <p className="text-xs text-muted-foreground">
+                        Alert below{" "}
+                        <span className="font-semibold text-foreground">
+                          {watchTargets[productId].toFixed(2)}€
+                        </span>{" "}
+                        <button
+                          onClick={handleWatchEditOpen}
+                          className="text-primary hover:underline"
+                        >
+                          Edit
+                        </button>
+                      </p>
+                    )}
+                    {!watchTargets[productId] && !showTargetInput && (
+                      <button
+                        onClick={handleWatchEditOpen}
+                        className="text-xs text-primary hover:underline"
+                      >
+                        Set price alert
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={handleWatchClick}
+                  >
+                    <BellOff className="h-4 w-4" />
+                    Watch price
+                  </Button>
+                )}
+                {showTargetInput && (
+                  <div className="flex flex-col items-end gap-1.5 mt-1">
+                    <label className="text-xs text-muted-foreground">
+                      Alert when below €
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={targetInputValue}
+                      onChange={(e) => setTargetInputValue(e.target.value)}
+                      className="w-28 rounded-md border border-border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                      placeholder="0.00"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" onClick={handleWatchSave}>
+                        Save
+                      </Button>
+                      <button
+                        onClick={handleWatchSkip}
+                        className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                      >
+                        Skip
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </CardHeader>
@@ -255,6 +384,10 @@ export default function ProductDetailPage() {
                 </>
               )}
             </div>
+            {/* Ad: desktop side-rail below stats */}
+            <div className="hidden lg:block mt-4">
+              <AdSideRail slotId="product-siderail" />
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -332,6 +465,11 @@ export default function ProductDetailPage() {
         </Card>
       )}
 
+      {/* Ad: mobile banner above chart */}
+      <div className="lg:hidden">
+        <AdBanner small slotId="product-mobile-banner" />
+      </div>
+
       {/* Price chart */}
       <Card>
         <CardHeader>
@@ -342,11 +480,11 @@ export default function ProductDetailPage() {
               onValueChange={(v) => setDays(parseInt(v, 10))}
             >
               <TabsList>
-                <TabsTrigger value="7">{t("products.week")}</TabsTrigger>
-                <TabsTrigger value="30">{t("products.month")}</TabsTrigger>
-                <TabsTrigger value="90">{t("products.threeMonths")}</TabsTrigger>
-                <TabsTrigger value="180">{t("products.sixMonths")}</TabsTrigger>
-                <TabsTrigger value="365">{t("products.year")}</TabsTrigger>
+                <TabsTrigger value="30">1M</TabsTrigger>
+                <TabsTrigger value="90">3M</TabsTrigger>
+                <TabsTrigger value="180">6M</TabsTrigger>
+                <TabsTrigger value="365">1Y</TabsTrigger>
+                <TabsTrigger value="9999">All</TabsTrigger>
               </TabsList>
             </Tabs>
           </div>

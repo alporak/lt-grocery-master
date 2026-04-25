@@ -1,104 +1,91 @@
 'use strict';
 // Runs at container startup to apply schema migrations to an existing database.
-// Uses the Prisma client (already present in the runner image) so no external
-// sqlite3 binary is required.
+// Uses the sqlite3 CLI (installed via apk in the runner image) for reliable,
+// synchronous DDL execution — avoids Prisma async/WAL quirks with ALTER TABLE.
 
-const { PrismaClient } = require('@prisma/client');
+const { execSync } = require('child_process');
 
-async function run() {
-  const prisma = new PrismaClient();
+const DB = (process.env.DATABASE_URL || '').replace(/^file:/, '');
+if (!DB) { console.error('DATABASE_URL not set'); process.exit(0); }
 
-  // Checkpoint WAL before reading schema so colExists sees fully committed state.
-  async function checkpoint() {
-    try { await prisma.$executeRawUnsafe('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* ignore */ }
-  }
+function run(sql) {
+  execSync(`sqlite3 "${DB}"`, { input: sql + '\n', encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+}
 
-  // Returns true when the column already exists in the table.
-  // Uses sqlite_master to read the committed schema, not WAL-buffered PRAGMA.
-  async function colExists(table, col) {
-    const rows = await prisma.$queryRawUnsafe(
-      `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table
-    );
-    if (!rows || rows.length === 0) return false;
-    const ddl = (rows[0].sql || '').toLowerCase();
-    return ddl.includes('"' + col.toLowerCase() + '"') || ddl.includes(' ' + col.toLowerCase() + ' ') || ddl.includes(' ' + col.toLowerCase() + ')');
-  }
+function query(sql) {
+  return execSync(`sqlite3 "${DB}" ${JSON.stringify(sql)}`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
 
-  async function addCol(table, col, def) {
-    if (await colExists(table, col)) return;
-    // Use $queryRawUnsafe for ALTER: Prisma 6.19+ SQLite driver throws
-    // "Execute returned results, which is not allowed in SQLite" from
-    // $executeRawUnsafe on ALTER TABLE even though the change applies.
-    // $queryRawUnsafe tolerates both result-returning and no-result queries.
-    try {
-      await prisma.$queryRawUnsafe(`ALTER TABLE "${table}" ADD COLUMN "${col}" ${def}`);
-    } catch (e) {
-      // Re-check: the ALTER may have applied anyway (known Prisma quirk).
-      if (!(await colExists(table, col))) {
-        console.error(`  ! failed to add ${table}.${col}: ${e.message}`);
-        return;
-      }
-    }
-    try { await prisma.$queryRawUnsafe('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* ignore */ }
-    console.log(`  + ${table}.${col}`);
-  }
-
+function colExists(table, col) {
   try {
-    await checkpoint();
+    const ddl = query(`SELECT sql FROM sqlite_master WHERE type='table' AND name='${table}'`).toLowerCase();
+    return ddl.includes('"' + col.toLowerCase() + '"');
+  } catch { return false; }
+}
 
-    // Product columns added after initial schema
-    await addCol('Product', 'searchIndex',       'TEXT');
-    await addCol('Product', 'barcode',            'TEXT');
-    await addCol('Product', 'canonicalCategory',  'TEXT');
-    await addCol('Product', 'subcategory',        'TEXT');
-    await addCol('Product', 'enrichment',         'TEXT');
-    await addCol('Product', 'enrichedAt',         'DATETIME');
-    await addCol('Product', 'enrichmentVersion',  'INTEGER');
-    await addCol('Product', 'reviewedAt',         'DATETIME');
-    await addCol('Product', 'productGroupId',     'INTEGER');
+function tableExists(name) {
+  return query(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='${name}'`) === '1';
+}
 
-    // GroceryListItem columns added after initial schema
-    await addCol('GroceryListItem', 'pinnedProductGroupId', 'INTEGER');
-    await addCol('GroceryListItem', 'preferredBrand',       'TEXT');
-    await addCol('GroceryListItem', 'pinnedProductId',      'INTEGER');
+function addCol(table, col, def) {
+  if (colExists(table, col)) return;
+  run(`ALTER TABLE "${table}" ADD COLUMN "${col}" ${def};`);
+  if (!colExists(table, col)) {
+    console.error(`  ! failed to add ${table}.${col}`);
+    return;
+  }
+  console.log(`  + ${table}.${col}`);
+}
 
-    // Indexes
-    const idxs = [
-      ['Product_searchIndex_idx',       'Product', 'searchIndex'],
-      ['Product_canonicalCategory_idx', 'Product', 'canonicalCategory'],
-      ['Product_subcategory_idx',       'Product', 'subcategory'],
-      ['Product_brand_idx',             'Product', 'brand'],
-      ['Product_reviewedAt_idx',        'Product', 'reviewedAt'],
-      ['Product_productGroupId_idx',    'Product', 'productGroupId'],
-    ];
-    for (const [name, tbl, col] of idxs) {
-      try {
-        await prisma.$queryRawUnsafe(
-          `CREATE INDEX IF NOT EXISTS "${name}" ON "${tbl}"("${col}")`
-        );
-      } catch { /* already exists or unsupported – ignore */ }
-    }
+try {
+  // Product columns added after initial schema
+  addCol('Product', 'searchIndex',       'TEXT');
+  addCol('Product', 'barcode',           'TEXT');
+  addCol('Product', 'canonicalCategory', 'TEXT');
+  addCol('Product', 'subcategory',       'TEXT');
+  addCol('Product', 'enrichment',        'TEXT');
+  addCol('Product', 'enrichedAt',        'DATETIME');
+  addCol('Product', 'enrichmentVersion', 'INTEGER');
+  addCol('Product', 'reviewedAt',        'DATETIME');
+  addCol('Product', 'productGroupId',    'INTEGER');
 
-    // ProductGroup table (added after initial schema)
-    await prisma.$queryRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "ProductGroup" (
+  // GroceryListItem columns added after initial schema
+  addCol('GroceryListItem', 'pinnedProductGroupId', 'INTEGER');
+  addCol('GroceryListItem', 'preferredBrand',       'TEXT');
+  addCol('GroceryListItem', 'pinnedProductId',      'INTEGER');
+
+  // Indexes
+  const idxs = [
+    ['Product_searchIndex_idx',       'Product', 'searchIndex'],
+    ['Product_canonicalCategory_idx', 'Product', 'canonicalCategory'],
+    ['Product_subcategory_idx',       'Product', 'subcategory'],
+    ['Product_brand_idx',             'Product', 'brand'],
+    ['Product_reviewedAt_idx',        'Product', 'reviewedAt'],
+    ['Product_productGroupId_idx',    'Product', 'productGroupId'],
+  ];
+  for (const [name, tbl, col] of idxs) {
+    try { run(`CREATE INDEX IF NOT EXISTS "${name}" ON "${tbl}"("${col}");`); } catch { /* ignore */ }
+  }
+
+  // ProductGroup table (added after initial schema)
+  if (!tableExists('ProductGroup')) {
+    run(`
+      CREATE TABLE "ProductGroup" (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         nameEn TEXT,
         canonicalCategory TEXT,
         createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    try {
-      await prisma.$queryRawUnsafe(
-        `CREATE INDEX IF NOT EXISTS "ProductGroup_canonicalCategory_idx" ON "ProductGroup"("canonicalCategory")`
       );
-    } catch { /* ignore */ }
+      CREATE INDEX IF NOT EXISTS "ProductGroup_canonicalCategory_idx" ON "ProductGroup"("canonicalCategory");
+    `);
+  }
 
-    // ScraperConfig table (added after initial schema)
-    await prisma.$queryRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "ScraperConfig" (
+  // ScraperConfig table (added after initial schema)
+  if (!tableExists('ScraperConfig')) {
+    run(`
+      CREATE TABLE "ScraperConfig" (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         url TEXT NOT NULL,
@@ -116,21 +103,15 @@ async function run() {
         lastRunCount INTEGER NOT NULL DEFAULT 0,
         createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
+      );
     `);
-
-    // SQLite performance settings (both return result rows → use $queryRawUnsafe)
-    await prisma.$queryRawUnsafe('PRAGMA journal_mode=WAL');
-    await prisma.$queryRawUnsafe('PRAGMA busy_timeout=15000');
-
-    console.log('Migration complete.');
-  } finally {
-    await prisma.$disconnect();
   }
-}
 
-run().catch(e => {
-  // Log but don't abort startup — a migration warning is better than a dead container.
+  // WAL mode + busy timeout
+  run('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=15000;');
+
+  console.log('Migration complete.');
+} catch (e) {
   console.error('Migration error (non-fatal):', e.message);
   process.exit(0);
-});
+}

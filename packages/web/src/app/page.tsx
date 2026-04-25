@@ -22,16 +22,67 @@ import {
   Bell,
   TrendingDown,
   Info,
+  Eye,
+  MapPin,
+  RefreshCw,
+  BarChart3,
+  PiggyBank,
 } from "lucide-react";
 import { getWatchedProducts, updateLastSeenPrice, unwatchProduct, type WatchedProduct } from "@/lib/watchedProducts";
 import { CATEGORY_LABELS } from "@/lib/categoryLabels";
 import { ProductPreviewModal } from "@/components/ProductPreviewModal";
+import { AdLeaderboard, AdBanner } from "@/components/ads/AdSlot";
 
 interface DashboardStats {
   totalProducts: number;
   storesTracked: number;
   lastScraped: string | null;
   activeListCount: number;
+}
+
+// --- Phase 2 types ---
+interface GroceryListItem {
+  id: number;
+  itemName: string;
+  quantity: number;
+  unit: string | null;
+  pinnedProductId: number | null;
+}
+
+interface GroceryList {
+  id: number;
+  name: string;
+  items: GroceryListItem[];
+}
+
+interface StoreCompareResult {
+  storeId: number;
+  storeName: string;
+  storeChain: string;
+  totalCost: number;
+  matchedCount: number;
+}
+
+interface BasketHeroData {
+  cheapestTotal: number;
+  cheapestStoreName: string;
+  storeResults: StoreCompareResult[];
+}
+
+interface NearestStoreInfo {
+  name: string;
+  chain: string;
+  distanceKm: number | null;
+  lastScrapedAt: string | null;
+}
+
+interface WidgetData {
+  basketTotal: number | null;
+  savedAmount: number | null;
+  watchingCount: number;
+  nearestStore: NearestStoreInfo | null;
+  lastSync: string | null;
+  itemsTracked: number | null;
 }
 
 interface DealProduct {
@@ -207,6 +258,10 @@ export default function DashboardPage() {
     unitPrice: number | null; unitLabel: string | null;
   }>>({});
 
+  // Phase 2 state
+  const [basketHero, setBasketHero] = useState<BasketHeroData | null | "loading">("loading");
+  const [widgetData, setWidgetData] = useState<WidgetData | null>(null);
+
   useEffect(() => {
     // Fetch deal products
     const dealsUrl = `/api/deals?limit=96&lang=${language}${minDiscount > 0 ? `&minDiscount=${minDiscount}` : ""}${dealCategory ? `&category=${dealCategory}` : ""}`;
@@ -275,6 +330,113 @@ export default function DashboardPage() {
     return () => clearInterval(statusInterval);
   }, [language, minDiscount, dealCategory]);
 
+  // Phase 2: Basket Hero + Widget Grid data
+  useEffect(() => {
+    let cancelled = false;
+
+    // SSR-safe watched count
+    let watchingCount = 0;
+    try {
+      const raw = localStorage.getItem("watchedProducts");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) watchingCount = parsed.length;
+      }
+    } catch { /* ignore */ }
+
+    // Fetch stores for nearest store / last sync widgets
+    const storesPromise = fetch("/api/stores")
+      .then((r) => r.json())
+      .then((stores: Array<{ name: string; chain: string; nearestDistance: number | null; lastScrapedAt: string | null }>) => stores)
+      .catch(() => [] as Array<{ name: string; chain: string; nearestDistance: number | null; lastScrapedAt: string | null }>);
+
+    // Fetch items tracked
+    const trackedPromise = fetch("/api/products?pageSize=1")
+      .then((r) => r.json())
+      .then((d: { total: number }) => d.total as number)
+      .catch(() => null as number | null);
+
+    // Fetch grocery list then compare
+    const basketPromise: Promise<BasketHeroData | null> = fetch("/api/grocery-lists")
+      .then((r) => r.json())
+      .then(async (lists: GroceryList[]) => {
+        const listWithItems = lists.find((l) => l.items && l.items.length > 0);
+        if (!listWithItems) return null;
+        const compareBody = {
+          items: listWithItems.items.map((i) => ({
+            itemName: i.itemName,
+            quantity: i.quantity,
+            unit: i.unit ?? undefined,
+            pinnedProductId: i.pinnedProductId ?? null,
+          })),
+          language: "lt",
+        };
+        const res = await fetch("/api/compare", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(compareBody),
+        });
+        if (!res.ok) return null;
+        const data = await res.json() as {
+          storeResults: StoreCompareResult[];
+          cheapestStoreId: number | null;
+          cheapestTotal: number;
+        };
+        if (!data.storeResults || data.storeResults.length === 0) return null;
+        const cheapestResult = data.cheapestStoreId != null
+          ? data.storeResults.find((s) => s.storeId === data.cheapestStoreId)
+          : data.storeResults.reduce((a, b) => a.totalCost <= b.totalCost ? a : b);
+        return {
+          cheapestTotal: data.cheapestTotal,
+          cheapestStoreName: cheapestResult?.storeName ?? data.storeResults[0].storeName,
+          storeResults: data.storeResults,
+        } satisfies BasketHeroData;
+      })
+      .catch(() => null);
+
+    Promise.all([storesPromise, trackedPromise, basketPromise]).then(([stores, tracked, basket]) => {
+      if (cancelled) return;
+
+      // Nearest store: first (sorted by distance in API)
+      const firstStore = stores[0] ?? null;
+      const nearestStore: NearestStoreInfo | null = firstStore
+        ? {
+            name: firstStore.name,
+            chain: firstStore.chain,
+            distanceKm: firstStore.nearestDistance,
+            lastScrapedAt: firstStore.lastScrapedAt,
+          }
+        : null;
+
+      // Last sync: most recently scraped across all stores
+      const lastSync = stores
+        .filter((s) => s.lastScrapedAt)
+        .sort((a, b) => new Date(b.lastScrapedAt!).getTime() - new Date(a.lastScrapedAt!).getTime())[0]
+        ?.lastScrapedAt ?? null;
+
+      // Savings = most expensive - cheapest
+      let savedAmount: number | null = null;
+      if (basket && basket.storeResults.length > 1) {
+        const costs = basket.storeResults.map((s) => s.totalCost).filter((c) => c > 0);
+        if (costs.length > 1) {
+          savedAmount = Math.max(...costs) - Math.min(...costs);
+        }
+      }
+
+      setBasketHero(basket);
+      setWidgetData({
+        basketTotal: basket?.cheapestTotal ?? null,
+        savedAmount,
+        watchingCount,
+        nearestStore,
+        lastSync,
+        itemsTracked: tracked,
+      });
+    });
+
+    return () => { cancelled = true; };
+  }, []);
+
   // Load watched products and fetch current prices
   useEffect(() => {
     const watched = getWatchedProducts();
@@ -301,6 +463,199 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      {/* ── Section A: Basket Hero ──────────────────────────────────────── */}
+      {basketHero === "loading" ? (
+        <div className="animate-pulse bg-muted h-28 rounded-xl" />
+      ) : basketHero === null ? (
+        <div className="flex items-center justify-center border border-dashed border-border rounded-xl h-20 text-sm text-muted-foreground gap-2">
+          <ShoppingBasket className="h-4 w-4" />
+          {language === "lt"
+            ? "Sukurkite pirkinių sąrašą, kad pamatytumėte krepšelio palyginimą"
+            : "Create a grocery list to see basket comparison"}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border bg-card px-5 py-4">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+            {/* Big price */}
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">
+                {language === "lt" ? "Krepšelis" : "Basket total"}
+              </p>
+              <div className="flex items-baseline gap-2">
+                <span className="text-4xl font-extrabold text-primary leading-none">
+                  €{basketHero.cheapestTotal.toFixed(2)}
+                </span>
+              </div>
+              <p className="text-sm text-muted-foreground mt-1">
+                {language === "lt" ? "pigiausia" : "cheapest"}{" "}
+                <span className="font-semibold text-foreground">
+                  {basketHero.cheapestStoreName}
+                </span>
+              </p>
+            </div>
+            {/* Store comparison chips */}
+            <div className="flex flex-wrap gap-2">
+              {basketHero.storeResults
+                .filter((s) => s.totalCost > 0)
+                .sort((a, b) => a.totalCost - b.totalCost)
+                .slice(0, 4)
+                .map((s, idx) => {
+                  const delta = s.totalCost - basketHero.cheapestTotal;
+                  const isChampion = idx === 0;
+                  return (
+                    <div
+                      key={s.storeId}
+                      className={`flex flex-col items-center px-3 py-2 rounded-lg border text-xs font-medium ${
+                        isChampion
+                          ? "bg-primary/10 border-primary/40 text-primary"
+                          : "bg-muted border-border text-muted-foreground"
+                      }`}
+                    >
+                      <span className="font-bold text-sm">
+                        {s.storeChain || s.storeName.split(" ")[0].toUpperCase().slice(0, 4)}
+                      </span>
+                      <span>
+                        {isChampion
+                          ? "✓"
+                          : delta > 0
+                          ? `+€${delta.toFixed(2)}`
+                          : `€${delta.toFixed(2)}`}
+                      </span>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Section B: Widget Grid ─────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        {/* Basket */}
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <ShoppingBasket className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">
+                {language === "lt" ? "Krepšelis" : "Basket"}
+              </p>
+              {widgetData === null ? (
+                <div className="animate-pulse bg-muted h-5 w-16 rounded mt-0.5" />
+              ) : widgetData.basketTotal != null ? (
+                <p className="text-xl font-bold leading-none mt-0.5">
+                  €{widgetData.basketTotal.toFixed(2)}
+                </p>
+              ) : (
+                <p className="text-xl font-bold leading-none mt-0.5 text-muted-foreground">—</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* You Saved */}
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <PiggyBank className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">
+                {language === "lt" ? "Sutaupyta" : "You Saved"}
+              </p>
+              {widgetData === null ? (
+                <div className="animate-pulse bg-muted h-5 w-16 rounded mt-0.5" />
+              ) : widgetData.savedAmount != null ? (
+                <p className="text-xl font-bold leading-none mt-0.5 text-green-600 dark:text-green-400">
+                  €{widgetData.savedAmount.toFixed(2)}
+                </p>
+              ) : (
+                <p className="text-xl font-bold leading-none mt-0.5 text-muted-foreground">—</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Watching */}
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <Eye className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">
+                {language === "lt" ? "Stebima" : "Watching"}
+              </p>
+              <p className="text-xl font-bold leading-none mt-0.5">
+                {widgetData?.watchingCount ?? 0}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Nearest Store */}
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <MapPin className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">
+                {language === "lt" ? "Artimiausia parduotuvė" : "Nearest Store"}
+              </p>
+              {widgetData === null ? (
+                <div className="animate-pulse bg-muted h-5 w-20 rounded mt-0.5" />
+              ) : widgetData.nearestStore ? (
+                <p className="text-sm font-bold leading-none mt-0.5 truncate">
+                  {widgetData.nearestStore.name}
+                  {widgetData.nearestStore.distanceKm != null && (
+                    <span className="text-xs font-normal text-muted-foreground ml-1">
+                      {widgetData.nearestStore.distanceKm.toFixed(1)}km
+                    </span>
+                  )}
+                </p>
+              ) : (
+                <p className="text-sm font-bold leading-none mt-0.5 text-muted-foreground">—</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Last Sync */}
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <RefreshCw className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">
+                {language === "lt" ? "Paskutinis sinchronizavimas" : "Last Sync"}
+              </p>
+              {widgetData === null ? (
+                <div className="animate-pulse bg-muted h-5 w-16 rounded mt-0.5" />
+              ) : (
+                <p className="text-sm font-semibold leading-none mt-0.5">
+                  {widgetData.lastSync ? timeAgo(new Date(widgetData.lastSync)) : "—"}
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Items Tracked */}
+        <Card className="py-3">
+          <CardContent className="px-4 py-0 flex items-center gap-3">
+            <BarChart3 className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div>
+              <p className="text-xs text-muted-foreground">
+                {language === "lt" ? "Produktų seka" : "Items Tracked"}
+              </p>
+              {widgetData === null ? (
+                <div className="animate-pulse bg-muted h-5 w-16 rounded mt-0.5" />
+              ) : (
+                <p className="text-xl font-bold leading-none mt-0.5">
+                  {widgetData.itemsTracked ?? "—"}
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ── Section C: Ad Leaderboard ──────────────────────────────────── */}
+      <AdLeaderboard slotId="home-leaderboard" />
+
       {/* Hero: Current Deals */}
       <div>
         <div className="flex items-center gap-2 mb-3">
@@ -601,6 +956,11 @@ export default function DashboardPage() {
           onClose={() => setPreviewProductId(null)}
         />
       )}
+
+      {/* Mobile AdBanner — shown only on small screens */}
+      <div className="sm:hidden">
+        <AdBanner small slotId="home-mobile-bottom" />
+      </div>
     </div>
   );
 }

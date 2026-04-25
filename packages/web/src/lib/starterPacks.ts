@@ -15,6 +15,28 @@ export interface StarterPack {
 }
 
 export const STARTER_PACKS: StarterPack[] = [
+    {
+    id: "lithuanian-classic",
+    emoji: "🇱🇹",
+    nameEn: "Lithuanian Classic",
+    nameLt: "Lietuviška virtuvė",
+    descEn: "Traditional Lithuanian weekly shopping",
+    descLt: "Tradicinis lietuviškas savaitės pirkinių sąrašas",
+    items: [
+      { itemName: "rye bread", quantity: 1 },
+      { itemName: "pienas", quantity: 2 },
+      { itemName: "sviestas", quantity: 1 },
+      { itemName: "varškė", quantity: 1 },
+      { itemName: "grietinė", quantity: 1 },
+      { itemName: "kiaušiniai", quantity: 10 },
+      { itemName: "bulvės", quantity: 1 },
+      { itemName: "kopūstai", quantity: 1 },
+      { itemName: "morkos", quantity: 1 },
+      { itemName: "svogūnai", quantity: 1 },
+      { itemName: "kiauliena", quantity: 1 },
+      { itemName: "grūdėta garstyčia", quantity: 1 },
+    ],
+  },
   {
     id: "student-survival",
     emoji: "🎓",
@@ -131,27 +153,5 @@ export const STARTER_PACKS: StarterPack[] = [
       { itemName: "milk", quantity: 1 },
       { itemName: "eggs", quantity: 6 },
     ],
-  },
-  {
-    id: "lithuanian-classic",
-    emoji: "🇱🇹",
-    nameEn: "Lithuanian Classic",
-    nameLt: "Lietuviška virtuvė",
-    descEn: "Traditional Lithuanian weekly shopping",
-    descLt: "Tradicinis lietuviškas savaitės pirkinių sąrašas",
-    items: [
-      { itemName: "rye bread", quantity: 1 },
-      { itemName: "pienas", quantity: 2 },
-      { itemName: "sviestas", quantity: 1 },
-      { itemName: "varškė", quantity: 1 },
-      { itemName: "grietinė", quantity: 1 },
-      { itemName: "kiaušiniai", quantity: 10 },
-      { itemName: "bulvės", quantity: 1 },
-      { itemName: "kopūstai", quantity: 1 },
-      { itemName: "morkos", quantity: 1 },
-      { itemName: "svogūnai", quantity: 1 },
-      { itemName: "kiauliena", quantity: 1 },
-      { itemName: "grūdėta garstyčia", quantity: 1 },
-    ],
-  },
+  }
 ];

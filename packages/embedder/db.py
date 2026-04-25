@@ -3,8 +3,7 @@ from config import DB_PATH, ENRICH_VERSION
 
 log = logging.getLogger("embedder")
 
-# Valid canonical category IDs — LLM must pick one of these
-_CATEGORY_IDS = [
+_CATEGORY_IDS =[
     "poultry","beef","pork","lamb","minced-meat","deli-meat","fish-seafood",
     "milk","cheese","yogurt","butter-cream","cottage-cheese","eggs",
     "bread","bakery","fruits","vegetables","salads-herbs","mushrooms","frozen-food",
@@ -16,13 +15,11 @@ _CATEGORY_IDS = [
 ]
 _CATEGORY_IDS_SET = set(_CATEGORY_IDS)
 
-
 def _run_db_migrations():
-    """Add new columns to existing DB if they don't exist (idempotent)."""
     conn = get_db_rw()
     try:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(Product)").fetchall()}
-        migrations = [
+        migrations =[
             ("subcategory", "TEXT"),
             ("enrichmentVersion", "INTEGER"),
         ]
@@ -31,7 +28,7 @@ def _run_db_migrations():
                 conn.execute(f"ALTER TABLE Product ADD COLUMN {col} {col_type}")
                 log.info(f"[Migration] Added column Product.{col}")
         existing_gli = {row[1] for row in conn.execute("PRAGMA table_info(GroceryListItem)").fetchall()}
-        gli_migrations = [
+        gli_migrations =[
             ("pinnedProductGroupId", "INTEGER"),
             ("preferredBrand", "TEXT"),
         ]
@@ -43,48 +40,35 @@ def _run_db_migrations():
     finally:
         conn.close()
 
-
 def get_db():
-    """Open a read-only SQLite connection."""
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def get_db_rw():
-    """Open a read-write SQLite connection."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
-
 def _normalize_brand(brand: str | None) -> str | None:
-    """Normalize brand name: strip excess whitespace, title-case if allcaps."""
     if not brand:
         return None
     brand = brand.strip()
     if not brand:
         return None
-    # If fully uppercase (e.g. "IKI", "RIMI") keep as-is (they're store names)
     if brand.isupper() and len(brand) <= 6:
         return brand
-    # If allcaps word longer than 6 chars, title-case it
     if brand.isupper():
         brand = brand.title()
     return brand
 
-
 def _validate_canonical_category(cat: str | None) -> str | None:
-    """Return cat if it's a valid known ID, else None."""
     if cat and cat in _CATEGORY_IDS_SET:
         return cat
     return None
 
-
 def _db_save_batch(rows: list, items: list, source: str = "auto"):
-    """Save successful enrichment results to DB. Only saves rows that have valid LLM data.
-    Failed/empty items are silently skipped — they remain unenriched and will be retried."""
     conn = get_db_rw()
     try:
         for i, row in enumerate(rows):

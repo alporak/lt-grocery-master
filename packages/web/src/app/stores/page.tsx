@@ -15,6 +15,7 @@ import {
 import { useI18n } from "@/components/i18n-provider";
 import { MapPin, Navigation, AlertCircle, Plus, X, Loader2, Trash2 } from "lucide-react";
 import Link from "next/link";
+import { AdBanner } from "@/components/ads/AdSlot";
 
 interface StoreLocation {
   id: number;
@@ -252,7 +253,8 @@ export default function StoresPage() {
             </Card>
           )}
 
-          {stores.map((store) => (
+          {stores.flatMap((store, idx) => {
+            const card = (
             <Card
               key={store.id}
               className={`border-l-4 ${chainColor[store.chain] || ""}`}
@@ -550,7 +552,12 @@ export default function StoresPage() {
                 )}
               </CardContent>
             </Card>
-          ))}
+            );
+            if ((idx + 1) % 4 === 0) {
+              return [card, <div key={`ad-store-${idx}`} className="md:hidden"><AdBanner small slotId={`stores-mobile-${idx}`} /></div>];
+            }
+            return [card];
+          })}
         </div>
       )}
     </div>

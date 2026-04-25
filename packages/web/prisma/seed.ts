@@ -19,7 +19,7 @@ async function main() {
     },
     {
       slug: "barbora",
-      name: "Barbora (Maxima)",
+      name: "Maxima",
       chain: "MAXIMA",
       url: "https://barbora.lt/",
     },

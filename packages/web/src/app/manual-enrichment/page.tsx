@@ -102,7 +102,7 @@ interface PipelineState {
 
 type Step = "config" | "prompt" | "paste" | "preview" | "saved";
 
-const BATCH_SIZES = [10, 50, 100, 500, 1000, 2000] as const;
+const BATCH_SIZES =[10, 50, 100, 500, 1000, 2000] as const;
 const LOAD_CHUNK_SIZE = 200; // max products per GET request
 const SAVE_CHUNK_SIZE = 200; // max entries per POST request
 
@@ -119,9 +119,9 @@ const CHAIN_COLORS: Record<string, string> = {
 
 export default function ManualEnrichmentPage() {
   // Config
-  const [batchSizeInput, setBatchSizeInput] = useState("10");
+  const [batchSizeInput, setBatchSizeInput] = useState("50"); // Defaults to 50 for Flash Lite
   const [storeFilter, setStoreFilter] = useState("all");
-  const [mode, setMode] = useState<"unenriched" | "all">("unenriched");
+  const[mode, setMode] = useState<"unenriched" | "all">("unenriched");
   const [offsetInput, setOffsetInput] = useState("0");
   const batchSize = Math.max(1, parseInt(batchSizeInput) || 1);
   const offset = Math.max(0, parseInt(offsetInput) || 0);
@@ -131,7 +131,7 @@ export default function ManualEnrichmentPage() {
 
   // Loaded batch
   const [products, setProducts] = useState<LoadedProduct[]>([]);
-  const [totalUnenriched, setTotalUnenriched] = useState(0);
+  const[totalUnenriched, setTotalUnenriched] = useState(0);
   const [totalAll, setTotalAll] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -144,13 +144,13 @@ export default function ManualEnrichmentPage() {
 
   // Prompt display
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
-  const [copiedFull, setCopiedFull] = useState(false);
+  const[copiedFull, setCopiedFull] = useState(false);
   const [copiedSystem, setCopiedSystem] = useState(false);
   const [copiedUser, setCopiedUser] = useState(false);
 
   // Paste / parse
   const [pasteText, setPasteText] = useState("");
-  const [parseResult, setParseResult] = useState<ParsedResult | null>(null);
+  const[parseResult, setParseResult] = useState<ParsedResult | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
 
   // Editable items (mirrors parseResult.items but mutable)
@@ -165,12 +165,12 @@ export default function ManualEnrichmentPage() {
   // Save
   const [saving, setSaving] = useState(false);
   const [saveProgress, setSaveProgress] = useState<string | null>(null);
-  const [saveResult, setSaveResult] = useState<SaveResult | null>(null);
+  const[saveResult, setSaveResult] = useState<SaveResult | null>(null);
 
   const pasteRef = useRef<HTMLTextAreaElement>(null);
 
   // ── Auto Enrichment State ───────────────────────────────────────────
-  const [autoKey, setAutoKey] = useState("");
+  const[autoKey, setAutoKey] = useState("");
   const [autoLogs, setAutoLogs] = useState<string[]>([]);
   const [autoRunning, setAutoRunning] = useState(false);
   const autoRunningRef = useRef(false);
@@ -195,12 +195,13 @@ export default function ManualEnrichmentPage() {
   useEffect(() => {
     fetch("/api/stores")
       .then((r) => r.json())
-      .then((d) => setStores(Array.isArray(d) ? d : d.stores ?? []))
+      .then((d) => setStores(Array.isArray(d) ? d : d.stores ??[]))
       .catch(() => {});
 
-    const storedKey = localStorage.getItem("gemini_api_key");
+    // Fixed casing issue with local storage
+    const storedKey = localStorage.getItem("GEMINI_API_KEY");
     if (storedKey) setAutoKey(storedKey);
-  }, []);
+  },[]);
 
   const refreshEnrichmentStats = useCallback(() => {
     fetch("/api/manual-enrichment?batchSize=1&mode=unenriched")
@@ -210,7 +211,7 @@ export default function ManualEnrichmentPage() {
         setTotalAll(d.totalAll ?? 0);
       })
       .catch(() => {});
-  }, []);
+  },[]);
 
   useEffect(() => {
     fetch("/api/scrape-status")
@@ -237,37 +238,47 @@ export default function ManualEnrichmentPage() {
     setAutoRunning(true);
     autoRunningRef.current = true;
     setAutoLogs([]); // Clear previous logs
-    logAuto("Starting Auto Enrichment loop (150 products per batch)...");
+    logAuto(`Starting Auto Enrichment loop (${batchSize} products per batch)...`);
 
     let totalSavedInSession = 0;
-    const AUTO_BATCH_SIZE = 150;
     const RATE_LIMIT_WAIT_MS = 15000; // 15 seconds to avoid Google rate limits
 
     while (autoRunningRef.current) {
-      logAuto(`Fetching next ${AUTO_BATCH_SIZE} unenriched products...`);
+      logAuto(`Fetching next ${batchSize} unenriched products...`);
       try {
-        const fetchRes = await fetch(`/api/manual-enrichment?batchSize=${AUTO_BATCH_SIZE}&mode=unenriched&offset=0`);
+        const fetchRes = await fetch(`/api/manual-enrichment?batchSize=${batchSize}&mode=unenriched&offset=0`);
         if (!fetchRes.ok) throw new Error(`Fetch failed: ${fetchRes.status}`);
         
         const data = await fetchRes.json();
-        const batchProducts = data.products || [];
+        const batchProducts = data.products ||[];
 
         if (batchProducts.length === 0) {
           logAuto("No more unenriched products found! Auto Enrichment finished.");
           break;
         }
 
-        logAuto(`Fetched ${batchProducts.length} products. Constructing prompt...`);
-        const prompt = buildFullPrompt(batchProducts);
+        logAuto(`Fetched ${batchProducts.length} products. Calling Gemini 3.1 Flash Lite...`);
+        const userMsg = buildUserMessage(batchProducts);
 
-        logAuto(`Sending to Gemini 3 Flash Preview...`);
-        const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${autoKey}`, {
+        // Uses proper JSON mode & System Instruction formatting for Gemini REST API
+        const reqBody = {
+          systemInstruction: {
+            parts: [{ text: SYSTEM_PROMPT }]
+          },
+          contents:[{ 
+            role: "user", 
+            parts: [{ text: userMsg }] 
+          }],
+          generationConfig: { 
+            responseMimeType: "application/json",
+            temperature: 0.5
+          }
+        };
+
+        const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${autoKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            generationConfig: { maxOutputTokens: 65536 }
-          })
+          body: JSON.stringify(reqBody)
         });
 
         if (!geminiRes.ok) {
@@ -282,14 +293,14 @@ export default function ManualEnrichmentPage() {
         const geminiData = await geminiRes.json();
         const textResponse = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-        logAuto("Parsing Gemini response...");
+        logAuto("Parsing JSON response...");
         const parsed = parseEnrichmentResponse(textResponse, batchProducts.length);
 
         if (!parsed.ok) {
           logAuto(`Parse warning: ${parsed.error}. Proceeding with valid items anyway.`);
         }
 
-        const entriesToSave: any[] = [];
+        const entriesToSave: any[] =[];
         parsed.items.forEach((item, i) => {
           if (item) entriesToSave.push({ id: batchProducts[i].id, enrichment: item });
         });
@@ -352,7 +363,7 @@ export default function ManualEnrichmentPage() {
       const chunkSize = Math.min(LOAD_CHUNK_SIZE, totalToLoad);
       const numChunks = Math.ceil(totalToLoad / chunkSize);
 
-      let allProducts: LoadedProduct[] = [];
+      let allProducts: LoadedProduct[] =[];
       let latestTotalUnenriched = 0;
       let latestTotalAll = 0;
 
@@ -378,7 +389,7 @@ export default function ManualEnrichmentPage() {
         }
         const data = await res.json();
         const chunk_products: LoadedProduct[] = data.products ?? [];
-        allProducts = [...allProducts, ...chunk_products];
+        allProducts =[...allProducts, ...chunk_products];
         latestTotalUnenriched = data.totalUnenriched ?? latestTotalUnenriched;
         latestTotalAll = data.totalAll ?? latestTotalAll;
 
@@ -460,7 +471,7 @@ export default function ManualEnrichmentPage() {
       }))
       .filter((e) => e.enrichment);
 
-    const total: SaveResult = { saved: 0, skipped: 0, errors: [] };
+    const total: SaveResult = { saved: 0, skipped: 0, errors:[] };
 
     try {
       const numChunks = Math.ceil(entries.length / SAVE_CHUNK_SIZE);
@@ -664,7 +675,7 @@ export default function ManualEnrichmentPage() {
                 <h2 className="text-lg font-bold">Auto Enrichment Engine</h2>
               </div>
               <p className="text-sm text-muted-foreground">
-                Automatically fetches <strong>100 products per batch</strong>, evaluates them via <strong>Gemini-3-Flash-Preview</strong> directly from your browser, and saves results to the database. It strictly waits for completion and respects Google's rate limits (15s cooldown per batch).
+                Automatically fetches <strong>{batchSize} products per batch</strong>, evaluates them via <strong>Gemini-3.1-Flash-Lite-Preview</strong> directly from your browser, and saves results to the database. It strictly waits for completion and respects Google's rate limits (15s cooldown per batch).
               </p>
               
               <div className="flex flex-col md:flex-row gap-4 items-end">
@@ -679,6 +690,24 @@ export default function ManualEnrichmentPage() {
                     className="font-mono bg-background"
                   />
                 </div>
+                
+                {/* Batch Size Config for Auto Loop */}
+                <div className="space-y-1 w-24">
+                  <label className="text-xs font-semibold text-muted-foreground uppercase">Batch Size</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={batchSizeInput}
+                    onChange={(e) => setBatchSizeInput(e.target.value)}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value);
+                      setBatchSizeInput(String(isNaN(v) || v < 1 ? 50 : v));
+                    }}
+                    disabled={autoRunning}
+                    className="font-mono bg-background"
+                  />
+                </div>
+
                 <div className="flex gap-2 w-full md:w-auto">
                   {!autoRunning ? (
                     <Button onClick={startAutoEnrichment} className="gap-2 bg-green-600 hover:bg-green-700 w-full md:w-auto">
@@ -696,7 +725,7 @@ export default function ManualEnrichmentPage() {
               <div className="relative">
                 <div className="bg-black text-green-400 font-mono text-xs p-4 rounded-md h-64 overflow-y-auto space-y-1">
                   {autoLogs.length === 0 ? (
-                    <span className="text-muted-foreground">Ready to start automatically enriching {totalUnenriched} products...</span>
+                    <span className="text-muted-foreground">Ready to start automatically enriching {totalUnenriched} products using Gemini 3.1 Flash Lite...</span>
                   ) : (
                     autoLogs.map((log, idx) => <div key={idx}>{log}</div>)
                   )}
@@ -957,7 +986,7 @@ export default function ManualEnrichmentPage() {
                   </div>
 
                   <div>
-                    <p className="text-xs font-semibold text-muted-foreground mb-1">User message (send after system prompt):</p>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">User message (send after system prompt to AI Studio):</p>
                     <textarea
                       readOnly
                       value={userMessage}
@@ -1019,7 +1048,7 @@ export default function ManualEnrichmentPage() {
                   ref={pasteRef}
                   value={pasteText}
                   onChange={(e) => { setPasteText(e.target.value); setParseResult(null); setStep("paste"); }}
-                  placeholder={`Paste the LLM response here. Expected format:\n{"results": [{"name_clean": "...", "brand": "...", "canonical_category": "milk", ...}, ...]}`}
+                  placeholder={`Paste the AI Studio JSON response here. Expected format:\n{"results": [{"name_clean": "...", "brand": "...", "canonical_category": "milk", ...}, ...]}`}
                   className="w-full h-48 text-xs font-mono bg-muted border rounded-md p-3 resize-y"
                   spellCheck={false}
                 />
