@@ -301,12 +301,20 @@ async function saveProducts(
 /**
  * Multi-pass deduplication within each store.
  *
+ * Pass 0 — RIMI externalId canonicalisation: rewrites any non-bare-numeric
+ *   RIMI externalId ("LT-12345", slug-suffixed, etc.) to its last 4+ digit
+ *   run. Without this, every subsequent scrape CREATEs a new row against the
+ *   legacy one (upsert key misses) and inflates "new products" forever.
+ *   Pass 2 merges the rows but leaves externalIds untouched — so the leak
+ *   repeats next run. Pass 0 closes that leak permanently.
+ *
  * Pass 1 — URL-normalised: strip query/hash/trailing-slash, lowercase.
  *   Catches query-param variants of the same product page.
  *
  * Pass 2 — externalId numeric-suffix: "LT-12345" and "12345" in the same store
  *   are the same item. Rimi historically emitted both formats, creating ~6 500
- *   duplicate rows.
+ *   duplicate rows. Kept as a safety net for non-RIMI stores and pre-Pass-0
+ *   residue.
  *
  * Pass 3 — name + imageUrl (conservative): same normalised Lithuanian name AND
  *   same imageUrl within a store. Guards against renamed externalIds with no
@@ -339,6 +347,58 @@ async function deduplicateProducts(): Promise<number> {
       data: { productId: survivorId },
     });
     await prisma.product.deleteMany({ where: { id: { in: dupeIds } } });
+  }
+
+  // ── Pass 0: RIMI externalId canonicalisation ─────────────────────────────
+  // Rewrites survivor externalId to bare last-4+digit run so subsequent
+  // upserts match instead of inserting.
+  {
+    const rimi = await prisma.store.findFirst({ where: { slug: "rimi" }, select: { id: true } });
+    if (rimi) {
+      const rows = await prisma.product.findMany({
+        where: { storeId: rimi.id },
+        select: { id: true, externalId: true, enrichment: true },
+      });
+
+      const target = (eid: string): string | null => {
+        const m = eid.match(/(\d{4,})(?!.*\d{4,})/); // last 4+ digit run
+        return m ? m[1] : null;
+      };
+
+      const byTarget = new Map<string, typeof rows>();
+      for (const p of rows) {
+        const t = target(p.externalId);
+        if (!t) continue;
+        if (!byTarget.has(t)) byTarget.set(t, []);
+        byTarget.get(t)!.push(p);
+      }
+
+      let pass0Merged = 0;
+      let pass0Renamed = 0;
+      for (const [t, group] of byTarget) {
+        const { survivorId, dupeIds } = pickSurvivor(group);
+        if (dupeIds.length > 0) {
+          await mergeDupes(survivorId, dupeIds);
+          pass0Merged += dupeIds.length;
+        }
+        const survivor = group.find((p) => p.id === survivorId)!;
+        if (survivor.externalId !== t) {
+          // Guard against a collision with a row outside this target group.
+          // Shouldn't happen (any row with suffix `t` would be in this group),
+          // but catch unique-constraint violation defensively.
+          try {
+            await prisma.product.update({ where: { id: survivorId }, data: { externalId: t } });
+            pass0Renamed++;
+          } catch (err) {
+            console.warn(`[Dedup] Pass 0 rename failed for id ${survivorId} → ${t}:`, err);
+          }
+        }
+      }
+      if (pass0Merged > 0 || pass0Renamed > 0) {
+        console.log(`[Dedup] Pass 0 (Rimi externalId canon): merged ${pass0Merged}, renamed ${pass0Renamed}`);
+      }
+      totalRemoved += pass0Merged;
+    }
   }
 
   // ── Pass 1: URL-normalised ────────────────────────────────────────────────

@@ -27,9 +27,51 @@
     "scraper": "Nuskaitytuvas",
     "settings": "Nustatymai",
     "categories": "Kategorijos",
+    "search": "Paieška",
     "categoryParser": "Kategorijų kūrėjas",
     "manualEnrichment": "Rankinis praturtinimas",
     "advancedSettings": "Išplėstiniai"
+  },
+  "search": {
+    "title": "Paieška",
+    "placeholder": "Ieškoti produktų, prekių ženklų, parduotuvių…",
+    "hint": "bandyk: duona < 2€ · sviestas lactose-free · pienas brand:rokiskio",
+    "matchingProducts": "Tinkantys produktai",
+    "actions": "Veiksmai",
+    "recent": "Paskutinės paieškos",
+    "noRecent": "Paskutinių paieškų nėra",
+    "footerHint": "↑↓ naršyti · ↵ pasirinkti · ⌘K atidaryti",
+    "addToList": "Pridėti „{q}“ į sąrašą",
+    "compareAll": "Palyginti visus rezultatus tarp parduotuvių",
+    "watchPrice": "Stebėti kainą",
+    "watching": "Stebima",
+    "storesSuffix": "parduotuvės",
+    "resultsCount": "rezultatai",
+    "empty": "Nieko nerasta. Pabandyk trumpesnį žodį arba sinonimą."
+  },
+  "browse": {
+    "title": "Naršyti kategorijas",
+    "subtitle": "{count} prekės stebimos 4 tinkluose",
+    "searchPlaceholder": "Ieškoti kategorijos…",
+    "filters": "Filtrai",
+    "itemsSuffix": "prekės",
+    "noCategories": "Kategorijų nerasta"
+  },
+  "compareSearch": {
+    "title": "Palyginti tarp parduotuvių",
+    "product": "Produktas",
+    "sort": "Rūšiuoti",
+    "sortCheapest": "pigiausios",
+    "sortName": "pavadinimas",
+    "sortSavings": "sutaupymai",
+    "filters": "Filtrai",
+    "add": "+ pridėti",
+    "empty": "Nėra ką palyginti. Įvesk produkto pavadinimą."
+  },
+  "ads": {
+    "label": "REKLAMA · rėmėjas",
+    "pleaseWhitelist": "Kol kas reklamos nepakrautos 🙈 prašome pridėti mus į adblock baltąjį sąrašą — taip galėsim toliau veltui stebėti kainas 🙏✨",
+    "pleaseWhitelistDesperate": "😭 adblock įjungtas — mes mirštame, prašome išjungti, maldaujam 🥺💀"
   },
   "dashboard": {
     "title": "Pradžia",

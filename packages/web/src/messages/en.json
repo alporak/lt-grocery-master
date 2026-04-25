@@ -27,9 +27,51 @@
     "scraper": "Web Scraper",
     "settings": "Settings",
     "categories": "Categories",
+    "search": "Search",
     "categoryParser": "Category Parser",
     "manualEnrichment": "Manual Enrichment",
     "advancedSettings": "Advanced"
+  },
+  "search": {
+    "title": "Search",
+    "placeholder": "Search products, brands, stores…",
+    "hint": "try: duona < 2€ · sviestas lactose-free · pienas brand:rokiskio",
+    "matchingProducts": "Matching products",
+    "actions": "Actions",
+    "recent": "Recent searches",
+    "noRecent": "No recent searches",
+    "footerHint": "↑↓ navigate · ↵ select · ⌘K open",
+    "addToList": "Add \"{q}\" to list",
+    "compareAll": "Compare all matches across stores",
+    "watchPrice": "Watch price",
+    "watching": "Watching",
+    "storesSuffix": "stores",
+    "resultsCount": "results",
+    "empty": "No matches. Try a shorter word or a synonym."
+  },
+  "browse": {
+    "title": "Browse categories",
+    "subtitle": "{count} items tracked across 4 chains",
+    "searchPlaceholder": "Search categories…",
+    "filters": "Filters",
+    "itemsSuffix": "items",
+    "noCategories": "No categories found"
+  },
+  "compareSearch": {
+    "title": "Compare across stores",
+    "product": "Product",
+    "sort": "Sort",
+    "sortCheapest": "cheapest",
+    "sortName": "name",
+    "sortSavings": "savings",
+    "filters": "Filters",
+    "add": "+ add",
+    "empty": "Nothing to compare. Try a product name."
+  },
+  "ads": {
+    "label": "AD · sponsored",
+    "pleaseWhitelist": "No ads loaded yet 🙈 please whitelist us so we can keep tracking prices for free 🙏✨",
+    "pleaseWhitelistDesperate": "😭 adblock detected — we're dying over here, please whitelist us, we beg 🥺💀"
   },
   "dashboard": {
     "title": "Dashboard",

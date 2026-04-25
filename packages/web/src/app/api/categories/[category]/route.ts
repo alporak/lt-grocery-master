@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { matchesDietaryFilter, type DietaryFilter } from "@/lib/dietaryTags";
 
 export const dynamic = "force-dynamic";
+
+const DIETARY_SET = new Set<DietaryFilter>(["vegan", "vegetarian", "gluten-free", "lactose-free"]);
 
 export async function GET(
   req: NextRequest,
@@ -15,6 +18,11 @@ export async function GET(
   const page = parseInt(searchParams.get("page") || "1", 10);
   const pageSize = parseInt(searchParams.get("pageSize") || "24", 10);
   const lang = searchParams.get("lang") || "lt";
+  const priceMinParam = searchParams.get("priceMin");
+  const priceMaxParam = searchParams.get("priceMax");
+  const priceMin = priceMinParam ? parseFloat(priceMinParam) : null;
+  const priceMax = priceMaxParam ? parseFloat(priceMaxParam) : null;
+  const attrs = (searchParams.get("attrs") || "").split(",").filter(Boolean);
 
   const storeIdFilter = storeIds
     ? storeIds.split(",").map(Number).filter(Boolean)
@@ -68,20 +76,45 @@ export async function GET(
     .filter((r) => r.brand)
     .map((r) => ({ name: r.brand!, count: r._count._all }));
 
-  // Fetch products with latest price
-  const [products, total] = await Promise.all([
-    prisma.product.findMany({
-      where,
-      include: {
-        store: { select: { id: true, name: true, chain: true } },
-        priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
-        productGroup: { select: { id: true } },
-      },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    }),
-    prisma.product.count({ where }),
-  ]);
+  // Fetch products with latest price.
+  // Post-fetch filtering (attrs + priceMin/Max) requires loading a wider window
+  // then paginating manually so total count stays accurate.
+  const needsRuntimeFilter = attrs.length > 0 || priceMin !== null || priceMax !== null;
+  const rawProducts = await prisma.product.findMany({
+    where,
+    include: {
+      store: { select: { id: true, name: true, chain: true } },
+      priceRecords: { orderBy: { scrapedAt: "desc" }, take: 1 },
+      productGroup: { select: { id: true } },
+    },
+    // When filtering runtime, grab a reasonable window; otherwise paginate at DB level
+    skip: needsRuntimeFilter ? 0 : (page - 1) * pageSize,
+    take: needsRuntimeFilter ? 2000 : pageSize,
+  });
+  const totalRaw = needsRuntimeFilter ? 0 : await prisma.product.count({ where });
+
+  const filtered = rawProducts.filter((p) => {
+    const pr = p.priceRecords[0];
+    const price = pr ? (pr.salePrice ?? pr.loyaltyPrice ?? pr.regularPrice) : null;
+    if (priceMin !== null && (price === null || price < priceMin)) return false;
+    if (priceMax !== null && (price === null || price > priceMax)) return false;
+    for (const attr of attrs) {
+      if (DIETARY_SET.has(attr as DietaryFilter)) {
+        if (!matchesDietaryFilter(attr as DietaryFilter, {
+          name: p.nameLt, nameEn: p.nameEn, canonicalCategory: p.canonicalCategory, subcategory: p.subcategory,
+        })) return false;
+      } else if (attr === "organic") {
+        const hay = `${p.nameLt} ${p.nameEn ?? ""}`.toLowerCase();
+        if (!hay.includes("eko") && !hay.includes("organic") && !hay.includes("bio")) return false;
+      }
+    }
+    return true;
+  });
+
+  const total = needsRuntimeFilter ? filtered.length : totalRaw;
+  const products = needsRuntimeFilter
+    ? filtered.slice((page - 1) * pageSize, page * pageSize)
+    : filtered;
 
   const withPrice = products.map((p) => {
     const pr = p.priceRecords[0];

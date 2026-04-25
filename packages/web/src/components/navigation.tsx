@@ -10,12 +10,14 @@ import {
   Settings,
   LayoutGrid,
   SlidersHorizontal,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "./i18n-provider";
 
 const navItems = [
   { path: "/", icon: LayoutDashboard, labelKey: "nav.dashboard" },
+  { path: "/search", icon: Search, labelKey: "nav.search" },
   { path: "/products", icon: Package, labelKey: "nav.products" },
   { path: "/categories", icon: LayoutGrid, labelKey: "nav.categories" },
   { path: "/grocery-lists", icon: ShoppingBasket, labelKey: "nav.groceryLists" },

@@ -785,6 +785,88 @@ export function buildFlexibleConditions(itemName: string): Record<string, unknow
   });
 }
 
+// ── Inline query syntax parser ───────────────────────────────────────────────
+// Supports: "sūris < 5€", "duona lactose-free", "pienas brand:rokiskio",
+//           "pomidorai > 2eur", "salotos organic vegan"
+// Returns cleaned terms plus structured filters.
+
+export interface ParsedQuery {
+  terms: string;                        // remaining free-text after extracting filters
+  priceMin: number | null;
+  priceMax: number | null;
+  brand: string | null;
+  attrs: string[];                      // vegan, vegetarian, gluten-free, lactose-free, organic
+}
+
+const ATTR_ALIASES: Record<string, string> = {
+  "vegan": "vegan",
+  "veganiškas": "vegan",
+  "veganiskas": "vegan",
+  "vegetarian": "vegetarian",
+  "vegetariškas": "vegetarian",
+  "vegetariskas": "vegetarian",
+  "gluten-free": "gluten-free",
+  "glutenfree": "gluten-free",
+  "gf": "gluten-free",
+  "be-gliuteno": "gluten-free",
+  "lactose-free": "lactose-free",
+  "lactosefree": "lactose-free",
+  "lf": "lactose-free",
+  "be-laktozes": "lactose-free",
+  "organic": "organic",
+  "eko": "organic",
+  "ekologiškas": "organic",
+  "ekologiskas": "organic",
+  "bio": "organic",
+};
+
+export function parseSearchQuery(raw: string): ParsedQuery {
+  let s = (raw ?? "").trim();
+  let priceMin: number | null = null;
+  let priceMax: number | null = null;
+  let brand: string | null = null;
+  const attrs = new Set<string>();
+
+  // price: "< 5€", "<5 eur", "< 5"
+  const ltMatch = s.match(/(?:^|\s)[<≤](\s*)(\d+(?:[.,]\d+)?)\s*(?:€|eur|eur\.)?/i);
+  if (ltMatch) {
+    priceMax = parseFloat(ltMatch[2].replace(",", "."));
+    s = s.replace(ltMatch[0], " ");
+  }
+  const gtMatch = s.match(/(?:^|\s)[>≥](\s*)(\d+(?:[.,]\d+)?)\s*(?:€|eur|eur\.)?/i);
+  if (gtMatch) {
+    priceMin = parseFloat(gtMatch[2].replace(",", "."));
+    s = s.replace(gtMatch[0], " ");
+  }
+
+  // brand:xyz (token may be quoted — keep simple: non-space)
+  const brandMatch = s.match(/(?:^|\s)brand:([^\s]+)/i);
+  if (brandMatch) {
+    brand = brandMatch[1];
+    s = s.replace(brandMatch[0], " ");
+  }
+
+  // dietary/organic tokens
+  const tokens = s.split(/\s+/).filter(Boolean);
+  const keep: string[] = [];
+  for (const tok of tokens) {
+    const key = tok.toLowerCase().replace(/[_]/g, "-");
+    if (ATTR_ALIASES[key]) {
+      attrs.add(ATTR_ALIASES[key]);
+    } else {
+      keep.push(tok);
+    }
+  }
+
+  return {
+    terms: keep.join(" ").trim(),
+    priceMin,
+    priceMax,
+    brand,
+    attrs: [...attrs],
+  };
+}
+
 const EMBEDDER_URL = process.env.EMBEDDER_URL || "http://embedder:8000";
 
 /**
@@ -809,6 +891,38 @@ export async function semanticSearch(
     if (!res.ok) return null;
     const data = await res.json();
     return data.results || null;
+  } catch {
+    return null;
+  }
+}
+
+export interface ListItemMatch {
+  id: number;
+  group_id: number | null;
+  score: number;
+  product_ids: number[];
+}
+
+/**
+ * Resolve grocery list item names to product group IDs via the embedder's /match-list endpoint.
+ * Returns null if the embedder is unavailable.
+ */
+export async function batchMatchListItems(
+  items: { id: number; name: string }[],
+  storeIds?: number[],
+): Promise<ListItemMatch[] | null> {
+  try {
+    const body: Record<string, unknown> = { items };
+    if (storeIds && storeIds.length > 0) body.store_ids = storeIds;
+    const res = await fetch(`${EMBEDDER_URL}/match-list`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.matches || null;
   } catch {
     return null;
   }

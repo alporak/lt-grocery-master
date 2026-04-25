@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>LT Grocery — Wireframes</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; font-family: Helvetica, Arial, sans-serif; }
+  * { box-sizing: border-box; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="wireframe-primitives.jsx"></script>
+<script type="text/babel" src="ads.jsx"></script>
+<script type="text/babel" src="screens-dashboard.jsx"></script>
+<script type="text/babel" src="screens-search.jsx"></script>
+<script type="text/babel" src="screens-list.jsx"></script>
+<script type="text/babel" src="screens-compare.jsx"></script>
+<script type="text/babel" src="screens-product.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+const MW = 260;   // mobile artboard width
+const MH = 520;   // mobile artboard height
+const DW = 900;   // desktop artboard width
+const DH = 560;   // desktop artboard height
+
+// One row: 4 options × (mobile + desktop) side-by-side
+function Pair({ M, D }) {
+  return (
+    <div style={{ display: 'flex', gap: 10 }}>
+      <div style={{ width: MW, height: MH }}><M /></div>
+      <div style={{ width: DW, height: DH, marginTop: 20 }}><D /></div>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <DesignCanvas>
+      <DCSection id="dashboard" title="Dashboard / Home" subtitle="Entry screen — what do users see first?">
+        <DCArtboard id="dash-a" label="A · Basket-first (total hero)" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={DashA_Mobile} D={DashA_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="dash-b" label="B · Receipt metaphor" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={DashB_Mobile} D={DashB_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="dash-c" label="C · Map-first (stores as lens)" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={DashC_Mobile} D={DashC_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="dash-d" label="D · Widget grid (spreadsheet vibe)" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={DashD_Mobile} D={DashD_Desktop} />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="search" title="Search / Browse" subtitle="Finding products across 4 chains">
+        <DCArtboard id="search-a" label="A · Filter rail + grid" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={SearchA_Mobile} D={SearchA_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="search-b" label="B · Category-first (visual browse)" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={SearchB_Mobile} D={SearchB_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="search-c" label="C · Command-bar / keyboard-first" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={SearchC_Mobile} D={SearchC_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="search-d" label="D · Inline per-store comparison" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={SearchD_Mobile} D={SearchD_Desktop} />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="list" title="Grocery List" subtitle="Building and managing the list">
+        <DCArtboard id="list-a" label="A · Checklist + per-item assignment" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ListA_Mobile} D={ListA_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="list-b" label="B · Swipe cards / kanban by store" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ListB_Mobile} D={ListB_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="list-c" label="C · Notepad (text-first)" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ListC_Mobile} D={ListC_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="list-d" label="D · Spreadsheet table" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ListD_Mobile} D={ListD_Desktop} />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="compare" title="Price Comparison Results" subtitle="Where should I shop?">
+        <DCArtboard id="cmp-a" label="A · Totals bar per store" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={CompareA_Mobile} D={CompareA_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="cmp-b" label="B · Per-item winner matrix" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={CompareB_Mobile} D={CompareB_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="cmp-c" label="C · Split basket (multi-stop route)" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={CompareC_Mobile} D={CompareC_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="cmp-d" label="D · Savings-first framing" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={CompareD_Mobile} D={CompareD_Desktop} />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="product" title="Product Detail + History" subtitle="One item, 4 stores, 90 days">
+        <DCArtboard id="prod-a" label="A · Chart + range + store list" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ProductA_Mobile} D={ProductA_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="prod-b" label="B · Sparkline per store" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ProductB_Mobile} D={ProductB_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="prod-c" label="C · Stock-market candle vibe" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ProductC_Mobile} D={ProductC_Desktop} />
+        </DCArtboard>
+        <DCArtboard id="prod-d" label="D · Watchlist / alert-focused" width={MW + DW + 10} height={MH + 20}>
+          <Pair M={ProductD_Mobile} D={ProductD_Desktop} />
+        </DCArtboard>
+      </DCSection>
+
+      <DCPostIt top={40} left={40} rotate={-3} width={210}>
+        Low-fi wireframes · Helvetica, hairline borders, muted.<br/>
+        Each row: mobile + desktop side-by-side.<br/>
+        Drag labels to reorder · click to focus.
+      </DCPostIt>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

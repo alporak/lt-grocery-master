@@ -36,18 +36,18 @@ services:
       dockerfile: packages/embedder/Dockerfile
     environment:
       - DATA_DIR=/app/data
-      - MODEL_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-      - OLLAMA_URL=${OLLAMA_URL:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=${GEMINI_MODEL}
-      - GEMINI_BATCH_SIZE=${GEMINI_BATCH_SIZE}
-      - GEMINI_THINKING_BUDGET=${GEMINI_THINKING_BUDGET}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - GEMINI_BATCH_SIZE=${GEMINI_BATCH_SIZE:-50}
+      - GEMINI_THINKING_BUDGET=${GEMINI_THINKING_BUDGET:-0}
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      - GEMINI_EMBEDDING_DIM=${GEMINI_EMBEDDING_DIM:-768}
     volumes:
       - grocery-data:/app/data
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 512M
     restart: unless-stopped
 
 volumes:
