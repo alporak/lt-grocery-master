@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Krepza | Lithuania Grocery Price Comparison</title>
+    <meta
+      name="description"
+      content="Krepza helps shoppers compare Lithuanian grocery prices, build baskets, and spot cheaper stores before checkout."
+    />
+    <meta
+      name="keywords"
+      content="Lithuania grocery prices, compare grocery prices, Maxima prices, Lidl Lithuania, Rimi Lithuania, grocery price comparison, Krepza"
+    />
+    <meta name="author" content="Krepza" />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#087f5b" />
+    <link rel="canonical" href="https://krepza.lt/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Krepza" />
+    <meta property="og:locale" content="en_LT" />
+    <meta
+      property="og:title"
+      content="Krepza | Lithuania Grocery Price Comparison"
+    />
+    <meta
+      property="og:description"
+      content="Compare Lithuanian grocery prices across local retailers and find the cheapest basket before you shop."
+    />
+    <meta property="og:url" content="https://krepza.lt/" />
+    <link rel="alternate" hreflang="en-LT" href="https://krepza.lt/" />
+    <link rel="alternate" hreflang="lt-LT" href="https://krepza.lt/?lang=lt" />
+    <link rel="alternate" hreflang="x-default" href="https://krepza.lt/" />
+    <meta name="twitter:card" content="summary" />
+    <meta
+      name="twitter:title"
+      content="Krepza | Lithuania Grocery Price Comparison"
+    />
+    <meta
+      name="twitter:description"
+      content="Compare Lithuanian grocery prices across local retailers and find the cheapest basket before you shop."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Krepza",
+        "url": "https://krepza.lt/",
+        "description": "Krepza helps shoppers compare Lithuanian grocery prices across local retailers.",
+        "inLanguage": "en-LT",
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": "https://krepza.lt/search?q={search_term_string}",
+          "query-input": "required name=search_term_string"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a href="#top" class="brand" aria-label="Krepza home">
+        <span class="brand-mark">K</span>
+        <span>Krepza</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#compare" data-i18n="navCompare">Compare</a>
+        <a href="#stores" data-i18n="navStores">Stores</a>
+        <a href="#alerts" data-i18n="navAlerts">Alerts</a>
+      </nav>
+      <div class="header-controls">
+        <div class="language-switcher" aria-label="Language selector">
+          <button class="active" type="button" data-lang="en" aria-label="English">
+            🇬🇧 EN
+          </button>
+          <button type="button" data-lang="lt" aria-label="Lithuanian">
+            🇱🇹 LT
+          </button>
+        </div>
+        <a class="header-action sign-in" href="#early-access" data-i18n="signIn">
+          Sign in
+        </a>
+        <a class="header-action primary-action" href="#early-access" data-i18n="join">
+          Join
+        </a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy reveal">
+          <p class="eyebrow" data-i18n="heroEyebrow">Built for Lithuanian grocery shoppers</p>
+          <h1 data-i18n="heroTitle">Compare prices before the basket gets expensive.</h1>
+          <p class="hero-lede" data-i18n="heroLead">
+            Krepza tracks grocery prices across Lithuanian retailers and shows
+            the cheapest route for everyday shopping.
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="btn btn-primary" href="#compare" data-i18n="viewDemo">View demo</a>
+            <a class="btn btn-secondary" href="#early-access" data-i18n="joinWaitlist">Join waitlist</a>
+          </div>
+        </div>
+
+        <div class="price-console reveal" aria-label="Price comparison preview">
+          <div class="console-topbar">
+            <div>
+              <span class="status-dot"></span>
+              <span data-i18n="liveMonitor">Live price monitor</span>
+            </div>
+            <div class="city-switcher" aria-label="City selector">
+              <button class="active" type="button" data-city="vilnius">Vilnius</button>
+              <button type="button" data-city="kaunas">Kaunas</button>
+            </div>
+          </div>
+
+          <div class="search-panel">
+            <label for="productSearch" data-i18n="searchProduct">Search product</label>
+            <div class="search-row">
+              <input
+                id="productSearch"
+                type="search"
+                placeholder="Milk, eggs, bananas..."
+                data-i18n-placeholder="searchPlaceholder"
+                autocomplete="off"
+              />
+              <button type="button" id="clearSearch" aria-label="Clear search">
+                <span data-i18n="clear">Clear</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="store-tabs" aria-label="Store filters">
+            <button class="active" type="button" data-store="all" data-i18n="allStores">All</button>
+            <button type="button" data-store="maxima">Maxima</button>
+            <button type="button" data-store="lidl">Lidl</button>
+            <button type="button" data-store="rimi">Rimi</button>
+            <button type="button" data-store="iki">Iki</button>
+          </div>
+
+          <div class="product-list" id="productList" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="metrics reveal" aria-label="Krepza highlights">
+        <div>
+          <strong data-i18n="metricRetailers">4 retailers</strong>
+          <span data-i18n="metricRetailersText">Ready for scraper feeds</span>
+        </div>
+        <div>
+          <strong data-i18n="metricBasket">Basket view</strong>
+          <span data-i18n="metricBasketText">Compare total spend</span>
+        </div>
+        <div>
+          <strong data-i18n="metricHistory">Price history</strong>
+          <span data-i18n="metricHistoryText">Watch real savings</span>
+        </div>
+      </section>
+
+      <section id="compare" class="compare-section">
+        <div class="section-heading reveal">
+          <p class="eyebrow" data-i18n="compareEyebrow">Product-first comparison</p>
+          <h2 data-i18n="compareTitle">One clean view for the same item across stores.</h2>
+          <p data-i18n="compareText">
+            The public website can start as a polished landing page today, then
+            grow into the live app once your data service is ready.
+          </p>
+        </div>
+
+        <div class="comparison-grid reveal">
+          <article class="comparison-card best">
+            <span class="store-logo">
+              <img src="./assets/Maxima_logo.png" alt="Maxima logo" />
+            </span>
+            <div>
+              <h3>Maxima</h3>
+              <p>Milk 2.5%, 1L</p>
+            </div>
+            <strong>€1.19</strong>
+            <span class="badge" data-i18n="bestToday">Best today</span>
+          </article>
+          <article class="comparison-card">
+            <span class="store-logo square-logo">
+              <img src="./assets/lidl_logo.png" alt="Lidl logo" />
+            </span>
+            <div>
+              <h3>Lidl</h3>
+              <p>Milk 2.5%, 1L</p>
+            </div>
+            <strong>€1.25</strong>
+            <span class="delta">+€0.06</span>
+          </article>
+          <article class="comparison-card">
+            <span class="store-logo">
+              <img src="./assets/Rimi_Baltic_Logo.png" alt="Rimi logo" />
+            </span>
+            <div>
+              <h3>Rimi</h3>
+              <p>Milk 2.5%, 1L</p>
+            </div>
+            <strong>€1.35</strong>
+            <span class="delta">+€0.16</span>
+          </article>
+        </div>
+      </section>
+
+      <section id="stores" class="stores-section reveal">
+        <div>
+          <p class="eyebrow" data-i18n="coverageEyebrow">Lithuania coverage</p>
+          <h2 data-i18n="coverageTitle">Designed around local retailers.</h2>
+        </div>
+        <div class="store-strip" aria-label="Supported stores">
+          <span class="store-partner">
+            <img src="./assets/Maxima_logo.png" alt="Maxima" />
+          </span>
+          <span class="store-partner">
+            <img src="./assets/lidl_logo.png" alt="Lidl" />
+          </span>
+          <span class="store-partner">
+            <img src="./assets/Rimi_Baltic_Logo.png" alt="Rimi" />
+          </span>
+          <span>Iki</span>
+          <span>Barbora</span>
+          <span>LastMile</span>
+        </div>
+      </section>
+
+      <section id="alerts" class="feature-band">
+        <article class="feature reveal">
+          <span class="feature-icon">%</span>
+          <h3 data-i18n="dealAlerts">Deal alerts</h3>
+          <p data-i18n="dealAlertsText">Follow products and get notified when price drops are worth it.</p>
+        </article>
+        <article class="feature reveal">
+          <span class="feature-icon">€</span>
+          <h3 data-i18n="basketTotals">Basket totals</h3>
+          <p data-i18n="basketTotalsText">Compare the total cost of a weekly basket before choosing a store.</p>
+        </article>
+        <article class="feature reveal">
+          <span class="feature-icon">↗</span>
+          <h3 data-i18n="trendSignals">Trend signals</h3>
+          <p data-i18n="trendSignalsText">See whether a price is stable, rising, or unusually low.</p>
+        </article>
+      </section>
+
+      <section id="early-access" class="signup-section reveal">
+        <div>
+          <p class="eyebrow" data-i18n="signupEyebrow">Domain-ready launch page</p>
+          <h2 data-i18n="signupTitle">Start collecting interest while the scraper runs behind it.</h2>
+          <p data-i18n="signupText">
+            Keep this site public now, then connect the product cards to live
+            market data when the backend is online.
+          </p>
+        </div>
+        <form class="signup-form">
+          <label for="email" data-i18n="email">Email</label>
+          <div class="signup-row">
+            <input
+              id="email"
+              type="email"
+              placeholder="you@example.com"
+              data-i18n-placeholder="emailPlaceholder"
+              required
+            />
+            <button class="btn btn-primary" type="submit" data-i18n="join">Join</button>
+          </div>
+          <small id="formMessage" aria-live="polite"></small>
+        </form>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-main">
+        <div class="footer-about">
+          <a href="#top" class="brand footer-brand">
+            <span class="brand-mark">K</span>
+            <span>Krepza</span>
+          </a>
+          <p data-i18n="footerAbout">
+            Grocery price intelligence for Lithuania. Compare stores, watch
+            price changes, and plan smarter baskets.
+          </p>
+          <div class="social-links" aria-label="Social links">
+            <a href="https://www.instagram.com/" aria-label="Instagram">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="5"></rect>
+                <circle cx="12" cy="12" r="4"></circle>
+                <circle cx="17.5" cy="6.5" r="1"></circle>
+              </svg>
+            </a>
+            <a href="https://www.facebook.com/" aria-label="Facebook">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 8h3V4h-3c-3 0-5 2-5 5v3H6v4h3v4h4v-4h3l1-4h-4V9c0-.6.4-1 1-1Z"></path>
+              </svg>
+            </a>
+            <a href="https://www.linkedin.com/" aria-label="LinkedIn">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 9h4v11H4zM4 4h4v3H4zM11 9h4v1.6c.7-1.1 1.8-1.9 3.4-1.9 2.5 0 4.1 1.7 4.1 5V20h-4v-5.7c0-1.4-.5-2.2-1.6-2.2-1.2 0-1.9.9-1.9 2.4V20h-4z"></path>
+              </svg>
+            </a>
+          </div>
+        </div>
+
+        <div class="footer-column">
+          <h2 data-i18n="footerProduct">Product</h2>
+          <a href="#compare" data-i18n="priceComparison">Price comparison</a>
+          <a href="#alerts" data-i18n="dealAlerts">Deal alerts</a>
+          <a href="#early-access" data-i18n="earlyAccess">Early access</a>
+        </div>
+
+        <div class="footer-column">
+          <h2 data-i18n="footerCoverage">Coverage</h2>
+          <a href="#stores" data-i18n="lithuanianRetailers">Lithuanian retailers</a>
+          <a href="#stores" data-i18n="cityCoverage">Vilnius and Kaunas</a>
+          <a href="#stores" data-i18n="basketTracking">Basket tracking</a>
+        </div>
+
+        <div class="footer-column">
+          <h2 data-i18n="footerCompany">Company</h2>
+          <a href="./about.html" data-i18n="aboutUs">About us</a>
+          <a href="./privacy.html" data-i18n="privacyPolicy">Privacy Policy</a>
+          <a href="mailto:hello@krepza.lt">hello@krepza.lt</a>
+          <a href="#top" data-i18n="backToTop">Back to top</a>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <p>© <span id="year"></span> Krepza. <span data-i18n="rights">All rights reserved.</span></p>
+        <div>
+          <span data-i18n="privacyFirst">Privacy-first price comparison</span>
+          <span>Lithuania</span>
+        </div>
+      </div>
+    </footer>
+
+    <script src="./script.js"></script>
+  </body>
+</html>
