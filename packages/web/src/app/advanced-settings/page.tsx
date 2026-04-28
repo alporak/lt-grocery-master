@@ -48,6 +48,16 @@ interface PipelineState {
   updatedAt?: string;
 }
 
+interface EnrichProgress {
+  running: boolean;
+  total: number;
+  done: number;
+  failed: number;
+  error: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
 interface OllamaHealthStatus {
   status: string;
   models?: string[];
@@ -233,6 +243,8 @@ export default function AdvancedSettingsPage() {
 
   // Pipeline state
   const [pipeline, setPipeline] = useState<PipelineState>({ status: "idle" });
+  const [enrichProgress, setEnrichProgress] = useState<EnrichProgress | null>(null);
+  const enrichPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [triggering, setTriggering] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [selectedPhases, setSelectedPhases] = useState<Set<string>>(new Set());
@@ -313,6 +325,33 @@ export default function AdvancedSettingsPage() {
       }
     };
   }, [pipeline.status, fetchPipelineStatus]);
+
+  // Poll bulk-enrich progress while enriching
+  useEffect(() => {
+    const pollEnrich = async () => {
+      try {
+        const res = await fetch("/api/bulk-enrich");
+        if (res.ok) setEnrichProgress(await res.json());
+      } catch { /* ignore */ }
+    };
+    if (pipeline.status === "enriching") {
+      pollEnrich();
+      if (!enrichPollRef.current) {
+        enrichPollRef.current = setInterval(pollEnrich, 4000);
+      }
+    } else {
+      if (enrichPollRef.current) {
+        clearInterval(enrichPollRef.current);
+        enrichPollRef.current = null;
+      }
+    }
+    return () => {
+      if (enrichPollRef.current) {
+        clearInterval(enrichPollRef.current);
+        enrichPollRef.current = null;
+      }
+    };
+  }, [pipeline.status]);
 
   const saveOllamaSettings = async () => {
     await fetch("/api/settings", {
@@ -699,7 +738,37 @@ export default function AdvancedSettingsPage() {
                   <p className="text-sm font-medium">{language === "lt" ? "Verčiami produktai..." : "Translating products..."}</p>
                 )}
                 {pipeline.status === "enriching" && (
-                  <p className="text-sm font-medium">{language === "lt" ? "Apdorojami duomenys..." : "Processing data..."}</p>
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">
+                      {language === "lt" ? "Apdorojami duomenys..." : "Processing data..."}
+                      {enrichProgress && enrichProgress.total > 0 && (
+                        <span className="text-muted-foreground font-normal ml-2">
+                          {enrichProgress.done}/{enrichProgress.total}
+                        </span>
+                      )}
+                    </p>
+                    {enrichProgress && enrichProgress.total > 0 && (
+                      <>
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-xs text-muted-foreground">
+                            <span>{language === "lt" ? "Praturtinta" : "Enriched"}</span>
+                            <span>{Math.round((enrichProgress.done / enrichProgress.total) * 100)}%</span>
+                          </div>
+                          <div className="h-2 bg-muted rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-primary transition-all duration-500"
+                              style={{ width: `${Math.round((enrichProgress.done / enrichProgress.total) * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                        {enrichProgress.failed > 0 && (
+                          <p className="text-xs text-destructive">
+                            {enrichProgress.failed} {language === "lt" ? "klaidos" : "failed"}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
                 )}
                 {pipeline.status === "clearing" && (
                   <p className="text-sm font-medium">{language === "lt" ? "Valomi esami duomenys..." : "Clearing existing data..."}</p>

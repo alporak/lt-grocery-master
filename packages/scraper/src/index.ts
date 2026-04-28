@@ -1,5 +1,5 @@
 import cron from "node-cron";
-import { runScrapeJob } from "./scrape-job.js";
+import { runScrapeJob, syncDataRepo } from "./scrape-job.js";
 import prisma from "./db.js";
 
 async function getInterval(): Promise<number> {
@@ -50,49 +50,6 @@ async function main() {
   if (staleCount.count > 0) {
     console.log(`[Scheduler] Cleaned up ${staleCount.count} stale 'running' log(s).`);
   }
-
-  // Run on startup only if scheduled scraping is enabled and stores need scraping
-  setTimeout(async () => {
-    if (running) return;
-    try {
-      const enabled = await isScheduledScrapeEnabled();
-      if (!enabled) {
-        console.log("[Scheduler] Scheduled scraping disabled, skipping startup scrape.");
-        return;
-      }
-
-      const intervalHours = await getInterval();
-      const stores = await prisma.store.findMany({
-        where: { enabled: true },
-        select: { lastScrapedAt: true },
-      });
-
-      const now = Date.now();
-      const needsScrape = stores.some((s) => {
-        if (!s.lastScrapedAt) return true;
-        const elapsed = now - s.lastScrapedAt.getTime();
-        return elapsed >= intervalHours * 60 * 60 * 1000;
-      });
-
-      if (!needsScrape) {
-        console.log(
-          `[Scheduler] All stores scraped within ${intervalHours}h, skipping startup scrape.`
-        );
-        return;
-      }
-
-      running = true;
-      console.log("[Scheduler] Stores need scraping, running initial scrape...");
-      try {
-        await runScrapeJob();
-      } finally {
-        running = false;
-      }
-    } catch (err) {
-      console.error("[Scheduler] Startup check error:", err);
-      running = false;
-    }
-  }, 10_000);
 
   // Schedule recurring runs
   // Check every hour if it's time to scrape based on the interval setting
@@ -192,6 +149,27 @@ async function main() {
     } catch (err) {
       console.error("[Scheduler] Manual scrape trigger error:", err);
       running = false;
+    }
+  });
+
+  // Data-sync trigger: poll dataSyncRequested every 30s (set by web after enrichment)
+  let lastHandledSync = "";
+  cron.schedule("*/30 * * * * *", async () => {
+    if (running) return;
+    try {
+      const req = await prisma.settings.findUnique({ where: { key: "dataSyncRequested" } });
+      const val = req?.value || "";
+      if (!val || val === lastHandledSync) return;
+      lastHandledSync = val;
+      await prisma.settings.upsert({
+        where: { key: "dataSyncRequested" },
+        update: { value: "" },
+        create: { key: "dataSyncRequested", value: "" },
+      });
+      console.log(`[Scheduler] Data sync requested (${val}), syncing repo...`);
+      await syncDataRepo("enrich");
+    } catch (err) {
+      console.error("[Scheduler] Data sync trigger error:", err);
     }
   });
 

@@ -11,7 +11,7 @@ services:
       - PORT=3130
       - NODE_ENV=production
     volumes:
-      - grocery-data:/app/data
+      - ./packages/data:/app/data
     restart: unless-stopped
 
   scraper:
@@ -23,8 +23,10 @@ services:
       - EMBEDDER_URL=http://embedder:8000
       - SCRAPE_HEADLESS=true
       - SCRAPE_INTERVAL_HOURS=24
+      - GIT_TOKEN=${GIT_TOKEN:-}
+      - GIT_REPO_URL=https://github.com/alporak/lt-grocery-master-db.git
     volumes:
-      - grocery-data:/app/data
+      - ./packages/data:/app/data
     depends_on:
       - web
       - embedder
@@ -41,12 +43,9 @@ services:
       - GEMINI_THINKING_BUDGET=${GEMINI_THINKING_BUDGET:-0}
       - GEMINI_EMBEDDING_DIM=${GEMINI_EMBEDDING_DIM:-768}
     volumes:
-      - grocery-data:/app/data
+      - ./packages/data:/app/data
     deploy:
       resources:
         limits:
           memory: 512M
     restart: unless-stopped
-
-volumes:
-  grocery-data:

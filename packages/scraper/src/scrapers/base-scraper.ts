@@ -31,6 +31,7 @@ export abstract class BaseScraper {
   protected headless: boolean;
   protected storeName: string;
   protected onProgress?: ProgressCallback;
+  protected requiresBrowser = true;
 
   setProgressCallback(cb: ProgressCallback) {
     this.onProgress = cb;
@@ -106,7 +107,7 @@ export abstract class BaseScraper {
 
   async run(): Promise<ScrapedProduct[]> {
     try {
-      await this.init();
+      if (this.requiresBrowser) await this.init();
       this.log("Starting scrape...");
       const products = await this.scrape();
       this.log(`Scraped ${products.length} products`);
@@ -115,7 +116,7 @@ export abstract class BaseScraper {
       this.log(`Error: ${err}`);
       throw err;
     } finally {
-      await this.close();
+      if (this.requiresBrowser) await this.close();
     }
   }
 }

@@ -151,30 +151,34 @@ export class LastmileScraper extends BaseScraper {
           name: string;
           url: string;
           priceText: string;
+          imageUrl: string | null;
         }> = [];
         const seen = new Set<string>();
 
         for (const anchor of anchors) {
           const a = anchor as HTMLAnchorElement;
           const href = a.href;
-          // Extract product ID from URL (last segment after last dash)
-          const urlParts = href.split("/product/").pop() || "";
+          // Strip query/hash/trailing slash before extracting ID for stable key
+          const cleanHref = href.split("?")[0].split("#")[0].replace(/\/+$/, "");
+          const urlParts = cleanHref.split("/product/").pop() || "";
+          if (!urlParts) continue;
+          // Prefer trailing numeric ID; fall back to clean slug (PROMO URLs have no numeric suffix)
           const idMatch = urlParts.match(/-(\d+)$/);
           const externalId = idMatch ? idMatch[1] : urlParts;
 
           if (seen.has(externalId)) continue;
           seen.add(externalId);
 
-          // The card's text contains name and price info
+          const img = a.querySelector("img");
           const cardText = a.textContent?.trim() || "";
-          // Product name is typically the first substantial text
-          const name = a.querySelector("img")?.alt || cardText.split(/\d+[.,]\d+\s*€/)[0]?.trim() || cardText.substring(0, 100);
+          const name = img?.alt || cardText.split(/\d+[.,]\d+\s*€/)[0]?.trim() || cardText.substring(0, 100);
 
           results.push({
             externalId,
             name,
-            url: href,
+            url: cleanHref,
             priceText: cardText,
+            imageUrl: img?.src || img?.getAttribute("data-src") || null,
           });
         }
         return results;
@@ -190,6 +194,7 @@ export class LastmileScraper extends BaseScraper {
         nameLt: p.name,
         categoryLt: categoryName,
         productUrl: p.url,
+        imageUrl: p.imageUrl || undefined,
         weightValue: weight?.value,
         weightUnit: weight?.unit,
         ...prices,

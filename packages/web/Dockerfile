@@ -24,8 +24,9 @@ FROM base AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs && \
+RUN deluser node 2>/dev/null; delgroup node 2>/dev/null; \
+    addgroup --system --gid 1000 nodejs && \
+    adduser --system --uid 1000 nextjs && \
     apk add --no-cache su-exec sqlite
 
 # Copy standalone output

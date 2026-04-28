@@ -1,3 +1,4 @@
+import { execSync } from "child_process";
 import prisma from "./db.js";
 import { ScrapedProduct } from "./scrapers/base-scraper.js";
 import { IkiScraper, PromoCashCarryScraper } from "./scrapers/lastmile.js";
@@ -16,6 +17,30 @@ function normalizeForIndex(text: string): string {
   return r.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
+
+// Marketing words to strip before name comparison
+const MARKETING_RE = /\b(akcija|naujiena|naujas|geriausia\s+kaina|tik|new|sale)\b!?/gi;
+
+// Normalised name for multi-tier dedup matching.
+// Keeps numeric tokens so "1l" ≠ "2l"; sorts tokens for order-invariant equality.
+function normName(name: string): string {
+  const stripped = name.replace(MARKETING_RE, "").replace(/^[\s!\-–—]+/, "");
+  const base = normalizeForIndex(stripped);
+  const tokens = base.split(/\s+/).filter((t) => t.length > 0);
+  tokens.sort();
+  return tokens.join(" ");
+}
+
+// T5 (name-only) safe when the name is specific enough.
+// Require ≥3 tokens, ≥10 chars, at least one numeric token.
+function isT5Safe(nn: string): boolean {
+  const tokens = nn.split(" ");
+  return tokens.length >= 3 && nn.length >= 10 && tokens.some((t) => /\d/.test(t));
+}
+
+// Stores where T5 (name-only) resolution is enabled.
+// Rimi/Lidl have stable externalIds; T5 there risks false merges.
+const T5_ENABLED_STORES = new Set(["iki", "promo-cash-and-carry", "barbora"]);
 
 interface Scraper {
   run(): Promise<ScrapedProduct[]>;
@@ -173,7 +198,7 @@ export async function runScrapeJob(storeSlugs?: string[]) {
   let storesCompleted = 0;
   for (const { store, products } of results) {
     if (products.length > 0) {
-      const { saved, newCount } = await saveProducts(store.id, products);
+      const { saved, newCount } = await saveProducts(store, products);
       await prisma.store.update({ where: { id: store.id }, data: { lastScrapedAt: new Date() } });
       totalProducts += saved;
       totalNew += newCount;
@@ -203,6 +228,83 @@ export async function runScrapeJob(storeSlugs?: string[]) {
     finishedAt: new Date().toISOString(),
     newProducts: totalNew,
   });
+
+  // Commit + push the database to the data submodule repo
+  await syncDataRepo("scrape");
+}
+
+/**
+ * Commit grocery.db to the data git repo and push.
+ * Requires GIT_TOKEN env var for authentication.
+ * Fails silently — never breaks the main pipeline.
+ */
+export async function syncDataRepo(trigger: string = "manual"): Promise<void> {
+  const token = process.env.GIT_TOKEN;
+  const repoUrl = process.env.GIT_REPO_URL || "https://github.com/alporak/lt-grocery-master-db.git";
+  const dataDir = "/app/data";
+
+  const authedUrl = token
+    ? repoUrl.replace("https://", `https://x-access-token:${token}@`)
+    : repoUrl;
+
+  try {
+    execSync(`git config --global --add safe.directory ${dataDir}`, { stdio: "pipe" });
+
+    // Ensure a writable git repo exists.
+    // Try writing git config as write-access gate.
+    try {
+      execSync(`git -C ${dataDir} config user.email "lt-grocery-bot@noreply"`, { stdio: "pipe" });
+    } catch {
+      console.log("[DataSync] Initialising fresh git repo in /app/data...");
+      execSync(`rm -rf ${dataDir}/.git 2>/dev/null; rm -f ${dataDir}/.git 2>/dev/null; true`, { stdio: "pipe", shell: "/bin/sh" });
+      execSync(`git init -b main ${dataDir}`, { stdio: "pipe" });
+      execSync(`git -C ${dataDir} remote add origin "${authedUrl}"`, { stdio: "pipe" });
+
+      if (token) {
+        try {
+          execSync(`git -C ${dataDir} fetch origin main --depth=1`, { stdio: "pipe" });
+          execSync(`git -C ${dataDir} reset --mixed origin/main`, { stdio: "pipe" });
+          console.log("[DataSync] Aligned with remote history (working files preserved)");
+        } catch {
+          console.log("[DataSync] No remote history yet — starting fresh");
+        }
+      }
+    }
+
+    // Configure identity (required for commits)
+    execSync(`git -C ${dataDir} config user.email "lt-grocery-bot@noreply"`, { stdio: "pipe" });
+    execSync(`git -C ${dataDir} config user.name "lt-grocery-bot"`, { stdio: "pipe" });
+
+    // Ensure remote URL has token (re-set every time so token rotation is picked up)
+    if (token) {
+      execSync(`git -C ${dataDir} remote set-url origin "${authedUrl}"`, { stdio: "pipe" });
+    }
+
+    // Stage the database file
+    execSync(`git -C ${dataDir} add grocery.db`, { stdio: "pipe" });
+
+    // Check if there's anything to commit
+    try {
+      execSync(`git -C ${dataDir} diff --cached --quiet`, { stdio: "pipe" });
+      console.log(`[DataSync] No changes to commit (${trigger})`);
+      return;
+    } catch {
+      // Non-zero exit = staged changes → proceed
+    }
+
+    const date = new Date().toISOString().slice(0, 10);
+    execSync(`git -C ${dataDir} commit -m "data: update ${date} (${trigger})"`, { stdio: "pipe" });
+    console.log(`[DataSync] Committed data update (${trigger})`);
+
+    if (token) {
+      execSync(`git -C ${dataDir} push origin HEAD:main`, { stdio: "pipe" });
+      console.log(`[DataSync] Pushed to remote`);
+    } else {
+      console.log("[DataSync] GIT_TOKEN not set — committed locally, skipping push");
+    }
+  } catch (err) {
+    console.error("[DataSync] Git sync failed (non-fatal):", err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -212,19 +314,75 @@ export async function runScrapeJob(storeSlugs?: string[]) {
  *   - EXISTING (already in DB by storeId+externalId): update details + add price record
  *   - NEW: create product row + add initial price record, no enrichment triggered
  *
- * Returns: { saved, newCount } — saved = total upserted, newCount = newly created products
+ * Returns: { saved, newCount } — saved = total upserted, newCount = genuinely new products
+ *
+ * Multi-tier name resolution: before inserting, check if an existing row matches
+ * by (T2) name+weight, (T3) name+brand, (T4) name+imageUrl, or (T5) name-only.
+ * If any tier matches, the scraped product updates the existing row instead of
+ * creating a new one. This prevents duplicate inserts when the site returns
+ * unstable externalIds (e.g. session-scoped numeric IDs on lastmile.lt).
  */
 async function saveProducts(
-  storeId: number,
+  store: { id: number; slug: string; name: string },
   products: ScrapedProduct[]
 ): Promise<{ saved: number; newCount: number }> {
-  // Pre-fetch known externalIds for this store so we can distinguish new vs existing
+  const storeId = store.id;
+
+  // Fetch existing rows with attributes needed to build resolution indexes
   const existingRows = await prisma.product.findMany({
     where: { storeId },
-    select: { externalId: true },
+    select: { externalId: true, nameLt: true, brand: true, weightValue: true, weightUnit: true, imageUrl: true },
   });
-  const knownIds = new Set(existingRows.map((r) => r.externalId));
 
+  // ── Build multi-tier resolution indexes ────────────────────────────────────
+  const knownIds     = new Set<string>();
+  const byNameWeight = new Map<string, string>(); // normName::weight → externalId
+  const byNameBrand  = new Map<string, string>(); // normName::brand  → externalId
+  const byNameImage  = new Map<string, string>(); // normName::image  → externalId
+  const byNameOnly   = new Map<string, string>(); // normName         → externalId
+
+  for (const r of existingRows) {
+    knownIds.add(r.externalId);
+    const nn = normName(r.nameLt);
+    if (!nn) continue;
+    if (r.weightValue != null && r.weightUnit) {
+      byNameWeight.set(`${nn}::${r.weightValue}${r.weightUnit}`, r.externalId);
+    }
+    if (r.brand) {
+      byNameBrand.set(`${nn}::${r.brand.toLowerCase()}`, r.externalId);
+    }
+    if (r.imageUrl) {
+      byNameImage.set(`${nn}::${r.imageUrl}`, r.externalId);
+    }
+    byNameOnly.set(nn, r.externalId);
+  }
+
+  type Tier = "T1" | "T2" | "T3" | "T4" | "T5";
+
+  function resolveExistingId(p: ScrapedProduct): { externalId: string; tier: Tier } | null {
+    if (knownIds.has(p.externalId)) return { externalId: p.externalId, tier: "T1" };
+    const nn = normName(p.nameLt);
+    if (!nn) return null;
+    if (p.weightValue != null && p.weightUnit) {
+      const hit = byNameWeight.get(`${nn}::${p.weightValue}${p.weightUnit}`);
+      if (hit) return { externalId: hit, tier: "T2" };
+    }
+    if (p.brand) {
+      const hit = byNameBrand.get(`${nn}::${p.brand.toLowerCase()}`);
+      if (hit) return { externalId: hit, tier: "T3" };
+    }
+    if (p.imageUrl) {
+      const hit = byNameImage.get(`${nn}::${p.imageUrl}`);
+      if (hit) return { externalId: hit, tier: "T4" };
+    }
+    if (T5_ENABLED_STORES.has(store.slug) && isT5Safe(nn)) {
+      const hit = byNameOnly.get(nn);
+      if (hit) return { externalId: hit, tier: "T5" };
+    }
+    return null;
+  }
+
+  const tierCounts: Record<Tier | "NEW", number> = { T1: 0, T2: 0, T3: 0, T4: 0, T5: 0, NEW: 0 };
   let saved = 0;
   let newCount = 0;
 
@@ -235,16 +393,23 @@ async function saveProducts(
     await prisma.$transaction(async (tx) => {
       for (const p of batch) {
         try {
-          const isNew = !knownIds.has(p.externalId);
+          const resolved = resolveExistingId(p);
+          const effectiveExternalId = resolved?.externalId ?? p.externalId;
+          const isNew = resolved === null;
+
+          if (resolved) {
+            tierCounts[resolved.tier]++;
+          } else {
+            tierCounts.NEW++;
+          }
 
           const searchParts = [p.nameLt, p.categoryLt, p.brand].filter(Boolean);
           const searchIndex = normalizeForIndex(searchParts.join(" "));
 
           const product = await tx.product.upsert({
-            where: { storeId_externalId: { storeId, externalId: p.externalId } },
+            where: { storeId_externalId: { storeId, externalId: effectiveExternalId } },
             update: {
               nameLt: p.nameLt,
-              // Use null to actively clear removed fields, undefined to preserve existing
               categoryLt: p.categoryLt || null,
               brand: p.brand || null,
               weightValue: p.weightValue ?? null,
@@ -255,7 +420,7 @@ async function saveProducts(
             },
             create: {
               storeId,
-              externalId: p.externalId,
+              externalId: effectiveExternalId,
               nameLt: p.nameLt,
               categoryLt: p.categoryLt || null,
               brand: p.brand || null,
@@ -267,8 +432,7 @@ async function saveProducts(
             },
           });
 
-          // Always record the price — both for new products (initial price) and
-          // existing ones (price change tracking)
+          // Always record the price for both new and existing products
           await tx.priceRecord.create({
             data: {
               productId: product.id,
@@ -283,7 +447,17 @@ async function saveProducts(
 
           if (isNew) {
             newCount++;
-            knownIds.add(p.externalId); // prevent double-counting within batches
+            // Register identity so subsequent products in this scrape resolve against it
+            knownIds.add(effectiveExternalId);
+            const nn = normName(p.nameLt);
+            if (nn) {
+              if (p.weightValue != null && p.weightUnit) {
+                byNameWeight.set(`${nn}::${p.weightValue}${p.weightUnit}`, effectiveExternalId);
+              }
+              if (p.brand) byNameBrand.set(`${nn}::${p.brand.toLowerCase()}`, effectiveExternalId);
+              if (p.imageUrl) byNameImage.set(`${nn}::${p.imageUrl}`, effectiveExternalId);
+              byNameOnly.set(nn, effectiveExternalId);
+            }
           }
           saved++;
         } catch (err) {
@@ -293,6 +467,16 @@ async function saveProducts(
     }, { timeout: 60000 }).catch(err => {
       console.warn(`[ScrapeJob] Batch transaction error (batch ${i / BATCH + 1}):`, err);
     });
+  }
+
+  const total = Object.values(tierCounts).reduce((a, b) => a + b, 0);
+  if (total > 0) {
+    console.log(
+      `[ScrapeJob] ${store.name} resolution: ` +
+      `T1=${tierCounts.T1} T2=${tierCounts.T2} T3=${tierCounts.T3} ` +
+      `T4=${tierCounts.T4} T5=${tierCounts.T5} NEW=${tierCounts.NEW}` +
+      (tierCounts.T5 > total * 0.1 ? " ⚠ T5 high — check for false merges" : "")
+    );
   }
 
   return { saved, newCount };
@@ -316,9 +500,9 @@ async function saveProducts(
  *   duplicate rows. Kept as a safety net for non-RIMI stores and pre-Pass-0
  *   residue.
  *
- * Pass 3 — name + imageUrl (conservative): same normalised Lithuanian name AND
- *   same imageUrl within a store. Guards against renamed externalIds with no
- *   stable URL.
+ * Pass 3a — normName + weight: same name (sorted-token, marketing-stripped) AND
+ *   same weight value+unit. Pass 3b — normName + brand. Pass 3c — normName + imageUrl.
+ *   Belt-and-braces after pre-save resolution; catches any leakage.
  *
  * In every pass: prefer the enriched product as survivor, otherwise keep the
  * oldest row (lowest id). Price records are re-parented; duplicate rows deleted.
@@ -455,19 +639,66 @@ async function deduplicateProducts(): Promise<number> {
     totalRemoved += pass2;
   }
 
-  // ── Pass 3: normalised name + imageUrl (conservative) ────────────────────
+  // ── Pass 3a: normName + weight (no imageUrl required) ────────────────────
+  {
+    const rows = await prisma.product.findMany({
+      where: { weightValue: { not: null } },
+      select: { id: true, storeId: true, nameLt: true, weightValue: true, weightUnit: true, enrichment: true },
+    });
+
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const nn = normName(p.nameLt);
+      if (!nn || !isT5Safe(nn)) continue;
+      const key = `${p.storeId}::${nn}::${p.weightValue}${p.weightUnit ?? ""}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+
+    let pass3a = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      pass3a += dupeIds.length;
+    }
+    if (pass3a > 0) console.log(`[Dedup] Pass 3a (name+weight): removed ${pass3a}`);
+    totalRemoved += pass3a;
+  }
+
+  // ── Pass 3b: normName + brand ─────────────────────────────────────────────
+  {
+    const rows = await prisma.product.findMany({
+      where: { brand: { not: null } },
+      select: { id: true, storeId: true, nameLt: true, brand: true, enrichment: true },
+    });
+
+    const groups = new Map<string, typeof rows>();
+    for (const p of rows) {
+      const nn = normName(p.nameLt);
+      if (!nn || nn.length < 4) continue;
+      const key = `${p.storeId}::${nn}::${p.brand!.toLowerCase()}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(p);
+    }
+
+    let pass3b = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const { survivorId, dupeIds } = pickSurvivor(group);
+      await mergeDupes(survivorId, dupeIds);
+      pass3b += dupeIds.length;
+    }
+    if (pass3b > 0) console.log(`[Dedup] Pass 3b (name+brand): removed ${pass3b}`);
+    totalRemoved += pass3b;
+  }
+
+  // ── Pass 3c: normName + imageUrl ──────────────────────────────────────────
   {
     const rows = await prisma.product.findMany({
       where: { imageUrl: { not: null } },
       select: { id: true, storeId: true, nameLt: true, imageUrl: true, enrichment: true },
     });
-
-    const normName = (s: string) =>
-      s.toLowerCase()
-        .replace(/\d+\s*(kg|g|ml|l|vnt|pak)/gi, "")
-        .replace(/[,.\-–]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
 
     const groups = new Map<string, typeof rows>();
     for (const p of rows) {
@@ -478,15 +709,15 @@ async function deduplicateProducts(): Promise<number> {
       groups.get(key)!.push(p);
     }
 
-    let pass3 = 0;
+    let pass3c = 0;
     for (const group of groups.values()) {
       if (group.length < 2) continue;
       const { survivorId, dupeIds } = pickSurvivor(group);
       await mergeDupes(survivorId, dupeIds);
-      pass3 += dupeIds.length;
+      pass3c += dupeIds.length;
     }
-    if (pass3 > 0) console.log(`[Dedup] Pass 3 (name+image): removed ${pass3}`);
-    totalRemoved += pass3;
+    if (pass3c > 0) console.log(`[Dedup] Pass 3c (name+image): removed ${pass3c}`);
+    totalRemoved += pass3c;
   }
 
   if (totalRemoved > 0) {

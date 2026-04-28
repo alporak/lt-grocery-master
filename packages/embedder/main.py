@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 log = logging.getLogger("embedder")
 
 from config import *
-from db import get_db, get_db_rw, _run_db_migrations, _db_save_batch
+from db import get_db, get_db_rw, _run_db_migrations, _db_save_batch, _db_save_by_id
 import embeddings as emb_module
 from embeddings import (load_embeddings, save_embeddings, _embed_texts,
                         _embed_new_products, _reembed_enriched)
@@ -805,6 +805,405 @@ def _do_import() -> dict:
         return {"imported": applied, "embeddings": len(new_vecs)}
     finally:
         conn.close()
+
+@app.post("/process")
+async def process_pipeline():
+    """Full pipeline: embed -> enrich -> group -> export. Synchronous."""
+    global _bulk_enrich_state
+
+    if _bulk_enrich_state["running"]:
+        return {"error": "Enrichment already running"}
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY not configured"}
+
+    _bulk_enrich_state = {
+        "running": True, "total": 0, "done": 0, "failed": 0,
+        "error": None, "started_at": time.time(), "finished_at": None,
+    }
+
+    results: dict = {}
+
+    # Step 1: Embed new products
+    try:
+        embed_result = _embed_new_products()
+        results["embed"] = embed_result
+    except Exception as e:
+        results["embed"] = {"error": str(e)}
+
+    # Step 2: Enrich (synchronous await)
+    try:
+        await _bulk_enrich_manager()
+        results["enrich"] = {
+            "total": _bulk_enrich_state["total"],
+            "done": _bulk_enrich_state["done"],
+            "failed": _bulk_enrich_state["failed"],
+        }
+    except Exception as e:
+        results["enrich"] = {"error": str(e)}
+
+    # Step 3: Group
+    try:
+        group_result = _do_grouping()
+        results["group"] = group_result
+    except Exception as e:
+        results["group"] = {"error": str(e)}
+
+    # Step 4: Export
+    try:
+        export_result = _do_export()
+        results["export"] = export_result
+    except Exception as e:
+        results["export"] = {"error": str(e)}
+
+    _bulk_enrich_state["running"] = False
+    _bulk_enrich_state["finished_at"] = time.time()
+
+    return {"status": "complete", "results": results}
+
+
+@app.get("/enrich/needed")
+def enrich_needed(limit: int = 50):
+    """Return unenriched products for external enrichment (opencode)."""
+    conn = get_db()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM Product WHERE enrichmentVersion IS NULL OR enrichmentVersion < ?",
+            (ENRICH_VERSION,)
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, nameLt, nameEn, categoryLt, categoryEn, brand FROM Product "
+            "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ? "
+            "ORDER BY id LIMIT ?",
+            (ENRICH_VERSION, limit)
+        ).fetchall()
+        products = [dict(r) for r in rows]
+        return {"products": products, "count": total}
+    finally:
+        conn.close()
+
+
+@app.post("/enrich/save")
+def enrich_save(body: dict):
+    """Save externally-enriched product data. Body: {'results': [{product_id, name_en, ...}, ...]}."""
+    items = body.get("results", [])
+    if not items or not isinstance(items, list):
+        raise HTTPException(400, "Missing 'results' array")
+    _db_save_by_id(items, source="opencode")
+    return {"saved": len(items)}
+
+
+@app.post("/enrich/auto")
+def enrich_auto():
+    """Auto-enrich all unenriched products using keyword/category matching. No API calls."""
+    from db import _db_save_by_id
+
+    # Extended keyword map — broader Lithuanian word forms
+    EXTRA_KW = {
+        "poultry": ["viščiuk", "paukštiena", "sparnel", "šlaunel", "blauzdel", "filė višt", "vištiena", "vištienos", "broilerių", "broileris", "paukštienos", "kalakutiena", "ančiukų", "ančiuku", "antiena", "antienos"],
+        "beef": ["jautiena", "jautienos", "antrekotas", "jautien", "guliaš", "gulias", "veršienos", "versienos", "veršiena", "jaučio", "jaucio", "billa premium"],
+        "pork": ["kiauliena", "kiaulienos", "šoninė", "sonine", "šonkaul", "sonkaul", "sprandin", "kumpis", "išpjova", "mentė", "mente", "nugarinė", "šonkauliai", "sonkauliai", "šešlykas", "saslykas", "karka", "dešrel", "desrel"],
+        "lamb": ["aviena", "ėriena", "avienos"],
+        "minced-meat": ["faršas", "malta", "smulkinta", "jautiena malta", "kiauliena malta", "kotletai"],
+        "deli-meat": ["dešrel", "desrel", "dešra", "desra", "rūkyt", "rukyt", "kumpis", "šaltai rūkytas", "karštai rūkytas", "šaltai rukyt", "karštai rukyt", "skilandis", "medžiotojų", "medziotoju"],
+        "fish-seafood": ["žuvis", "žuvies", "zuvies", "lašiša", "lasisa", "šamo", "samo", "upėtakis", "upetakis", "dorados", "skumbrės", "skumbres", "karpių", "karp", "argentinos", "ančiuvių", "anchiuviu", "silke", "silkė", "menkė", "menke", "tunas", "krevetės", "krevetes", "žuvies", "žuvys", "silkių", "silkiu", "tuno"],
+        "vegetables": ["daržov", "darzov", "morkos", "svogūnai", "svogunai", "paprikos", "pomidorai", "bulvės", "bulves", "cukinijos", "baklažan", "bakezan", "smidrai", "kukurūz", "kukuruz", "morkytes", "kopūstai", "kopustai", "česnakai", "cesnakai", "salierai", "bulvytės", "bulvytes", "ridikė", "ridike", "ananasas", "žirneliai", "zirneliai"],
+        "salads-herbs": ["salotos", "lapinės", "lapines", "lollo biondo", "salierai"],
+        "mushrooms": ["pievagryb", "grybai", "šampinjonai", "portabela", "rudieji pievagrybiai"],
+        "fruits": ["vaisiai", "obuol", "apelsin", "banan", "kivi", "vynuog", "citrin", "brašk", "braske", "mandarinai", "avokadai", "kriaušės", "kriause", "avietės", "avietes", "šilauogės", "silauoges", "mangai", "greipfrutai", "mango", "aviet", "slyvos", "slyva", "gervuog", "ananasas"],
+        "cheese": ["sūris", "suris", "sūrio", "surio", "camembert", "cheddar", "emmental", "lydytas sūris", "lydytas suris", "varškė", "varske"],
+        "eggs": ["kiaušin", "kiaušiniai", "kikis"],
+        "bread": ["duona", "batonas", "bandel", "bandeles", "bandelės", "brioche", "mėsainio bandelės", "duonos gaminiai"],
+        "sauces-condiments": ["kečupas", "kecupas", "marinatas", "padažas", "padazas", "marinade", "čatnis", "catnis", "glazūra", "glazura", "padažo"],
+        "spices": ["prieskoniai", "pipirai", "prieskon", "kmynai", "marinatas", "prieskoniai"],
+        "pet-food": ["šunų", "kačių", "šunims", "katėms", "gyvūnų", "gyvunams", "gyvunu"],
+        "ready-meals": ["gulias", "troškinti", "troskinimui", "troškinimui", "lietiniai", "lietin", "blynai", "koldūnai", "cepelinai", "kukuliai", "mišrain", "misrain"],
+        "frozen-food": ["šaldyt", "saldyt", "ledai", "šaldytas", "saldyti"],
+        "sweets-chocolate": ["šokolad", "sokolad", "saldain", "saldumyn", "kremas", "desertas", "zefyrai", "marshmallow", "sausain", "slyvo", "gervuog"],
+        "snacks": ["traškuč", "traskuc", "riešut", "riesut", "pistacijos", "pistacij", "kreker", "užkand", "uzkand", "sūdyti", "sudyti", "kepintos", "druska", "javinuk", "javure"],
+        "cleaning": ["šluost", "sluost", "valymo", "ploviklis", "plovikli"],
+        "paper-products": ["popieriniai", "tualetinis", "servetėl", "servetel"],
+        "personal-care": ["šampūn", "sampun", "muilas", "dušo", "duso", "drėgnos", "dregnos", "kosmetika"],
+        "baby-food": ["kūdiki", "kudiki", "vaiku", "kūdik", "kudik"],
+        "other": [],
+    }
+
+    # Direct mapping from store categoryLt to canonical category
+    CAT_LT_MAP = [
+        (["pieno produktai", "pienas", "pienelis", "pieniškas", "kefyras", "jogurtas", "grietin", "sūris", "suris", "varškė", "varsk", "kiaušinin", "kiaušiniai", "kikis"], ["milk", "cheese", "yogurt", "butter-cream", "cottage-cheese", "eggs"]),
+        (["mėsa", "mesa ir zuvis", "vistiena", "kiauliena", "jautiena"], ["poultry", "pork", "beef", "minced-meat", "deli-meat"]),
+        (["žuvis", "zuvies", "jūros gėrybės", "juros gerybes", "žuvys"], ["fish-seafood"]),
+        (["daržov", "darzov", "vaisiai", "vaisi"], ["vegetables", "fruits"]),
+        (["duonos gaminiai", "konditerija", "kulinarija", "kepiniai"], ["bread", "bakery"]),
+        (["gėrim", "gerim", "vanduo", "sultys", "alus", "vynas", "alkoholiniai"], ["beer", "wine", "spirits", "soda-soft-drinks", "water", "juice"]),
+        (["higiena", "grožio", "grozio", "kosmetika", "sveikata", "asmens"], ["personal-care", "health", "paper-products"]),
+        (["vaiku", "kūdiki", "kudiki", "baby"], ["baby-food"]),
+        (["gyvūn", "gyvun", "šunų", "kačių", "sunu", "kaciu", "pet", "namini"], ["pet-food"]),
+        (["namų ūkio", "namu ukio", "valymo", "plovik", "buities", "skalbimo"], ["cleaning", "laundry", "paper-products"]),
+        (["užkand", "uzkand", "saldumyn", "saldaini", "šokolad", "sokolad", "traškuč", "traskuc", "sausain"], ["snacks", "sweets-chocolate", "cereals"]),
+        (["prieskoniai", "padaž", "padaz", "marinat", "aliejus", "actas"], ["spices", "sauces-condiments", "oil-vinegar", "flour-baking"]),
+        (["griliui", "barbekiu", "šašlyk", "saslyk", "kepsni"], ["poultry", "pork", "beef", "deli-meat"]),
+        (["konserv", "konservuot"], ["canned-food"]),
+        (["frozen", "šaldyt", "saldyt", "šaldik"], ["frozen-food"]),
+        (["ryžiai", "ryziai", "kruopos", "grikiai", "makaron", "miltai", "kepimo"], ["rice-grains", "pasta", "flour-baking"]),
+        (["sultys", "nektaras", "smoothie", "gazuoti gėrimai", "limonadas"], ["juice", "soda-soft-drinks"]),
+        (["alaus", "alus", "craft", "lager"], ["beer"]),
+        (["vyno", "vynas", "šampano"], ["wine"]),
+        (["degtin", "viskio", "romas", "džinas", "dzinas", "stiprieji"], ["spirits"]),
+        (["kava", "arbata", "kavos", "kavos pupel"], ["coffee", "tea"]),
+    ]
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, nameLt, categoryLt, brand FROM Product "
+            "WHERE enrichmentVersion IS NULL OR enrichmentVersion < ? "
+            "ORDER BY id",
+            (ENRICH_VERSION,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items = []
+    brand_re = re.compile(r'\b(CLEVER|BON VIA|HEINZ|SANTA MARIA|PRESIDENT|GRILL PARTY|PREMIUM|IKI ŪKIS|IKI MĖSA|PAGAMINTA IKI|GRYNUOLIAI|KLAIPĖDOS MAISTAS|LOLLO BIONDO|BRIOCHE|GIMINIŲ|GIMINIU|THAI|HEINZ)\b', re.IGNORECASE)
+    size_re = re.compile(r'(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|vnt|vienet|vnt\.|pak\.)', re.IGNORECASE)
+
+    for row in rows:
+        pid = row["id"]
+        name = row["nameLt"] or ""
+        cat_lt = row["categoryLt"] or ""
+        text = f"{name} {cat_lt}".lower()
+
+        # Score canonical categories
+        best_cat = "other"
+        best_score = 0
+        for cat in canonical_categories:
+            cid = cat["id"]
+            score = 0
+            for kw in cat.get("keywords", []):
+                if kw.lower() in text:
+                    score += 1
+            for kw in EXTRA_KW.get(cid, []):
+                if kw.lower() in text:
+                    score += 2
+            if score > best_score:
+                best_score = score
+                best_cat = cid
+
+        # Score via categoryLt store categories
+        cat_lt_lower = cat_lt.lower()
+        for patterns, cat_ids in CAT_LT_MAP:
+            for pat in patterns:
+                if pat.lower() in cat_lt_lower:
+                    for cid in cat_ids:
+                        score = 1 + (1 if cid == "other" else 2)
+                        if score > best_score:
+                            best_score = score
+                            best_cat = cid
+
+        # Check categoryLt for clues when keywords fail
+        if best_score == 0 and cat_lt:
+            cat_lt_lower = cat_lt.lower()
+            if any(w in cat_lt_lower for w in ["mėsa", "mesa", "žuvis", "zuvies", "fish", "jūros"]):
+                best_cat = "other"  # keep as-is, meat categories need clear food signal
+            elif any(w in cat_lt_lower for w in ["gėrim", "gerimy", "vanduo"]):
+                if any(w in text for w in ["alus", "beer", "ale", "lager"]):
+                    best_cat = "beer"
+                elif any(w in text for w in ["vynas", "vyno", "wine"]):
+                    best_cat = "wine"
+                elif any(w in text for w in ["degtin", "vodka", "whisky", "džinas", "romas"]):
+                    best_cat = "spirits"
+                else:
+                    best_cat = "soda-soft-drinks"
+
+        # Extract brand (uppercase words known as brands, or uppercase in name)
+        brand = None
+        bm = brand_re.search(name)
+        if bm:
+            brand_raw = bm.group(1)
+            brand = brand_raw if brand_raw.isupper() else brand_raw.title()
+
+        # Extract size
+        size_m = size_re.search(name)
+        size_val = None
+        size_unit = None
+        if size_m:
+            try:
+                size_val = float(size_m.group(1).replace(",", "."))
+                size_unit = size_m.group(2).lower()
+            except ValueError:
+                pass
+
+        # Clean name for English version
+        name_en = name.strip()
+        name_en = re.sub(r'\s+,', ',', name_en)
+        en_map = {
+            "kiaulienos": "Pork", "jautienos": "Beef", "vištienos": "Chicken",
+            "viščiukų": "Chicken", "broilerių": "Broiler", "šviežias": "Fresh",
+            "švieži": "Fresh", "marinuota": "Marinated", "marinuotas": "Marinated",
+            "rūkyta": "Smoked", "rūkytos": "Smoked", "rūkytas": "Smoked",
+            "šaltai": "Cold", "karštai": "Hot",
+            "be kaulo": "Boneless", "su kaulu": "Bone-in",
+            "šoninė": "Belly", "sprandinė": "Neck", "kumpis": "Ham",
+            "mentė": "Shoulder", "išpjova": "Tenderloin",
+            "šonkauliai": "Ribs", "filė": "Fillet", "kepsniai": "Steaks",
+            "dešrelės": "Sausages", "dešrelė": "Sausage",
+            "mėsa": "Meat", "troškinimui": "for Stewing",
+            "pievagrybiai": "Mushrooms", "grybai": "Mushrooms",
+            "paprikos": "Peppers", "svogūnai": "Onions",
+            "morkos": "Carrots", "pomidorai": "Tomatoes",
+            "bulvės": "Potatoes", "cukinijos": "Zucchini",
+            "baklažanai": "Eggplants", "salotos": "Salad",
+            "sūris": "Cheese", "pienas": "Milk",
+            "kečupas": "Ketchup", "marinatas": "Marinade",
+            "bandelės": "Buns", "bandelė": "Bun",
+        }
+        for lt_word, en_word in en_map.items():
+            name_en = re.sub(re.escape(lt_word), en_word, name_en, flags=re.IGNORECASE)
+        name_en = " ".join(w.capitalize() for w in name_en.split())
+
+        item = {
+            "product_id": pid,
+            "name_en": name_en,
+            "name_lt": name.strip(),
+            "brand": brand,
+            "canonical_category": best_cat,
+            "subcategory": None,
+            "is_food": best_cat not in ("cleaning", "laundry", "paper-products", "personal-care", "health", "pet-food", "baby-food", "other"),
+            "size": {"value": size_val, "unit": size_unit},
+            "attributes": {"category": cat_lt} if cat_lt else {},
+            "search_text": f"{name_en} {brand or ''} {cat_lt}".strip(),
+            "query_variants": [name.strip(), name_en],
+        }
+        items.append(item)
+
+    _db_save_by_id(items, source="auto-keyword")
+    return {"enriched": len(items)}
+
+
+@app.get("/enrich/auto/status")
+def enrich_auto_status():
+    """Check how many products still need enrichment."""
+    conn = get_db()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
+        done = conn.execute("SELECT COUNT(*) FROM Product WHERE enrichmentVersion = ?", (ENRICH_VERSION,)).fetchone()[0]
+        return {"total": total, "enriched": done, "remaining": total - done}
+    finally:
+        conn.close()
+
+    items = []
+    brand_patterns = re.compile(r'\b(CLEVER|BON VIA|HEINZ|SANTA MARIA|PRESIDENT|GRILL PARTY|PREMIUM|IKI ŪKIS|IKI MĖSA|PAGAMINTA IKI|GRYNUOLIAI|KLAIPĖDOS MAISTAS|LOLLO BIONDO)\b', re.IGNORECASE)
+    size_re = re.compile(r'(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|vnt|vienet|pakuotė|pak\.)', re.IGNORECASE)
+
+    for row in rows:
+        pid = row["id"]
+        name = row["nameLt"] or ""
+        cat_lt = row["categoryLt"] or ""
+        text = f"{name} {cat_lt}".lower()
+
+        # Score categories by keyword matches
+        best_cat = "other"
+        best_score = 0
+        for cat in canonical_categories:
+            score = 0
+            for kw in cat.get("keywords", []):
+                if kw.lower() in text:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_cat = cat["id"]
+
+        # Extract brand
+        brand = None
+        bm = brand_patterns.search(name)
+        if bm:
+            brand = bm.group(1).title()
+
+        # Extract size
+        size_m = size_re.search(name)
+        size_val = None
+        size_unit = None
+        if size_m:
+            try:
+                size_val = float(size_m.group(1).replace(",", "."))
+                size_unit = size_m.group(2).lower()
+            except ValueError:
+                pass
+
+        # Simple English name (upper-case cleaned)
+        name_en = name.strip()
+        name_en = re.sub(r'\s+,', ',', name_en)
+        # Replace known LT food words with EN equivalents
+        en_map = {
+            "kiaulienos": "Pork", "jautienos": "Beef", "vištienos": "Chicken",
+            "viščiukų": "Chicken", "broilerių": "Chicken", "šviežias": "Fresh",
+            "švieži": "Fresh", "marinuota": "Marinated", "marinuotas": "Marinated",
+            "rūkyta": "Smoked", "rūkytos": "Smoked", "rūkytas": "Smoked",
+            "šalta": "Cold", "karštai": "Hot",
+            "be kaulo": "Boneless", "su kaulu": "Bone-in",
+            "šoninė": "Belly", "sprandinė": "Neck", "kumpis": "Ham",
+            "mentė": "Shoulder", "išpjova": "Tenderloin",
+            "šonkauliai": "Ribs", "filė": "Fillet", "kepsniai": "Steaks",
+            "dešrelės": "Sausages", "dešrelė": "Sausage",
+            "mėsa": "Meat", "troškinimui": "for Stewing",
+            "pievagrybiai": "Mushrooms", "grybai": "Mushrooms",
+            "paprikos": "Peppers", "svogūnai": "Onions",
+            "morkos": "Carrots", "pomidorai": "Tomatoes",
+            "bulvės": "Potatoes", "cukinijos": "Zucchini",
+            "baklažanai": "Eggplants", "salotos": "Salad",
+            "sūris": "Cheese", "pienas": "Milk",
+            "kečupas": "Ketchup", "marinatas": "Marinade",
+            "bandelės": "Buns", "bandelė": "Bun",
+        }
+        for lt_word, en_word in en_map.items():
+            name_en = re.sub(re.escape(lt_word), en_word, name_en, flags=re.IGNORECASE)
+        # Capitalize first letter of each word
+        name_en = " ".join(w.capitalize() for w in name_en.split())
+
+        item = {
+            "product_id": pid,
+            "name_en": name_en,
+            "name_lt": name.strip(),
+            "brand": brand,
+            "canonical_category": best_cat,
+            "subcategory": None,
+            "is_food": best_cat not in ("cleaning", "laundry", "paper-products", "personal-care", "health", "pet-food", "baby-food", "other"),
+            "size": {"value": size_val, "unit": size_unit},
+            "attributes": {"category": cat_lt} if cat_lt else {},
+            "search_text": f"{name_en} {brand or ''} {cat_lt}".strip(),
+            "query_variants": [name.strip(), name_en],
+        }
+        items.append(item)
+
+    _db_save_by_id(items, source="auto-keyword")
+    return {"enriched": len(items)}
+
+
+@app.post("/enrich/auto/status")
+def enrich_auto_status():
+    """Check how many products still need enrichment."""
+    conn = get_db()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM Product").fetchone()[0]
+        done = conn.execute("SELECT COUNT(*) FROM Product WHERE enrichmentVersion = ?", (ENRICH_VERSION,)).fetchone()[0]
+        return {"total": total, "enriched": done, "remaining": total - done}
+    finally:
+        conn.close()
+def enrich_reembed(body: dict):
+    """Re-embed enriched products and embed new ones. Body: {'count': N}."""
+    count = body.get("count", 20)
+    conn = get_db_rw()
+    try:
+        _reembed_enriched(conn, count)
+    finally:
+        conn.close()
+    new_result = _embed_new_products()
+    return {
+        "reembedded": count,
+        "new": new_result.get("embedded", 0),
+        "total": len(emb_module.product_ids),
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

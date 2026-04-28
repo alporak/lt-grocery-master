@@ -175,6 +175,12 @@ export class LidlScraper extends BaseScraper {
       );
       if (!moreBtn || !(await moreBtn.isVisible().catch(() => false))) break;
 
+      // Remove consent overlay before each click — it can re-appear after navigation
+      await page.evaluate(() => {
+        document.getElementById('onetrust-consent-sdk')?.remove();
+        document.querySelector('.onetrust-pc-dark-filter')?.remove();
+      }).catch(() => {});
+
       await moreBtn.click();
       await this.delay(2000);
     }
@@ -190,22 +196,39 @@ export class LidlScraper extends BaseScraper {
       }> = [];
       const seen = new Set<string>();
 
-      for (const link of document.querySelectorAll<HTMLAnchorElement>('a[href*="/p/"]')) {
+      for (const link of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/p/"]'))) {
         const href = link.href;
         const idMatch = href.match(/\/p(\d+)(?:[?#/]|$)/);
         const externalId = idMatch?.[1] || "";
         if (!externalId || seen.has(externalId)) continue;
         seen.add(externalId);
 
-        // Walk up to the product card (stop when parent has many children = grid)
-        let card: Element = link;
-        while (card.parentElement && card.parentElement !== document.body) {
-          if (card.parentElement.children.length > 3) break;
-          card = card.parentElement;
+        // Find card container.
+        // Try semantic elements first — most reliable.
+        // Fall back to walk-up with a higher threshold (6 instead of 3) so cards
+        // whose inner wrapper has 4+ elements (image, name, price, badges, button)
+        // don't cause the walk to stop one level too early.
+        const semanticCard = (link.closest("li") ?? link.closest("article")) as Element | null;
+        let card: Element;
+        if (semanticCard) {
+          card = semanticCard;
+        } else {
+          card = link;
+          for (let i = 0; i < 12; i++) {
+            if (!card.parentElement || card.parentElement === document.body) break;
+            if (card.parentElement.children.length > 6) break;
+            card = card.parentElement;
+          }
         }
 
+        // Prefer a dedicated price element inside the card for cleaner text extraction.
+        const priceEl =
+          card.querySelector<Element>('[class*="pricebox"]') ??
+          card.querySelector<Element>('[class*="price-box"]') ??
+          card.querySelector<Element>('[class*="price"]');
+
         const img = card.querySelector("img");
-        const name = (link.textContent || img?.alt || "")
+        const name = (img?.alt || link.textContent || "")
           .trim()
           .split("\n")[0]
           ?.trim() || "";
@@ -215,8 +238,12 @@ export class LidlScraper extends BaseScraper {
           externalId,
           name,
           url: href.split("#")[0],
-          priceText: card.textContent || "",
-          imageUrl: img?.src || img?.getAttribute("data-src") || null,
+          priceText: priceEl?.textContent || card.textContent || "",
+          imageUrl:
+            img?.src ||
+            img?.getAttribute("data-src") ||
+            img?.getAttribute("srcset")?.split(/[,\s]/)[0] ||
+            null,
         });
       }
       return results;
@@ -275,10 +302,33 @@ export class LidlScraper extends BaseScraper {
       .replace(/\d+(?:[.,]\d+)?\s*(?:kg|l|g|ml|vnt)\s*=\s*\d+[.,]\d+\s*€/gi, "")
       .replace(/\d+[.,]\d+\s*€\s*\/\s*(?:kg|l|g|ml|vnt)/gi, "");
 
-    // Package prices remaining (in order of appearance)
-    const priceMatches = [...cleaned.matchAll(/(\d+[.,]\d+)\s*€/g)];
+    // Package prices remaining (in order of appearance).
+    // Collect both decimal format ("3,99 €") and split format ("3 99 €" / "3\n99\n€").
+    const priceEntries: Array<{ value: number; index: number }> = [];
+
+    // Split format: integer euros followed immediately by 2-digit cents and €
+    // e.g. "3 99 €" or "3\n99\n€" (common on Lidl LT)
+    const splitRe = /\b(\d{1,3})\s+(\d{2})\s*€/g;
+    let sm: RegExpExecArray | null;
+    while ((sm = splitRe.exec(cleaned)) !== null) {
+      priceEntries.push({ value: parseFloat(`${sm[1]}.${sm[2]}`), index: sm.index });
+    }
+
+    // Decimal format — skip positions already covered by a split match
+    const decRe = /(\d+[.,]\d+)\s*€/g;
+    let dm: RegExpExecArray | null;
+    while ((dm = decRe.exec(cleaned)) !== null) {
+      const covered = priceEntries.some((e) => Math.abs(e.index - dm!.index) < 6);
+      if (!covered) {
+        priceEntries.push({ value: parseFloat(dm[1].replace(",", ".")), index: dm.index });
+      }
+    }
+
+    priceEntries.sort((a, b) => a.index - b.index);
+    const priceMatches = priceEntries; // keep name for consistency below
+
     if (priceMatches.length >= 1) {
-      regularPrice = parseFloat(priceMatches[0][1].replace(",", "."));
+      regularPrice = priceMatches[0].value;
     }
 
     // Campaign text
@@ -287,13 +337,11 @@ export class LidlScraper extends BaseScraper {
 
     // Second price: loyalty (su Lidl Plus) or regular sale
     if (priceMatches.length >= 2) {
-      const secondPrice = parseFloat(priceMatches[1][1].replace(",", "."));
+      const secondPrice = priceMatches[1].value;
       const isLidlPlus  = /su\s+lidl\s+plus/i.test(text);
       if (isLidlPlus) {
-        // Lidl Plus card price — show separately (not a public sale)
         loyaltyPrice = secondPrice;
       } else if (campMatch) {
-        // Regular promotional sale
         salePrice = secondPrice;
       }
     }

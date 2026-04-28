@@ -169,11 +169,18 @@ export class BarboraScraper {
           for (const anchor of anchors) {
             const a = anchor as HTMLAnchorElement;
             const href = a.href;
-            if (!href.includes("/produktai/")) continue;
+            // Strip query/hash/trailing slash before extracting slug
+            const cleanHref = href.split("?")[0].split("#")[0].replace(/\/+$/, "");
+            if (!cleanHref.includes("/produktai/")) continue;
 
-            const slug = href.split("/produktai/").pop() || "";
-            if (!slug || seen.has(slug)) continue;
-            seen.add(slug);
+            const slug = cleanHref.split("/produktai/").pop() || "";
+            if (!slug) continue;
+            // Prefer trailing numeric ID (≥4 digits) for a stable key
+            const numMatch = slug.match(/(\d{4,})$/);
+            const externalId = numMatch ? numMatch[1] : slug;
+
+            if (seen.has(externalId)) continue;
+            seen.add(externalId);
 
             // Walk up to find the product card container
             let card: Element | null = a;
@@ -189,9 +196,9 @@ export class BarboraScraper {
               slug.replace(/-/g, " ");
 
             results.push({
-              externalId: slug,
+              externalId,
               name,
-              url: href,
+              url: cleanHref,
               priceText: cardText,
               imageUrl: img?.src || null,
             });

@@ -79,28 +79,78 @@ def _db_save_batch(rows: list, items: list, source: str = "auto"):
                 canonical_cat = _validate_canonical_category(item.get("canonical_category"))
                 subcategory = item.get("subcategory") or None
 
-                conn.execute(
-                    """UPDATE Product SET
-                        enrichment = ?,
-                        enrichedAt = datetime('now'),
-                        enrichmentVersion = ?,
-                        enrichmentSource = ?,
-                        nameEn = COALESCE(NULLIF(?, ''), nameEn),
-                        brand = COALESCE(NULLIF(?, ''), brand),
-                        canonicalCategory = COALESCE(NULLIF(?, ''), canonicalCategory),
-                        subcategory = COALESCE(NULLIF(?, ''), subcategory)
-                    WHERE id = ?""",
-                    (
-                        json.dumps(item),
-                        ENRICH_VERSION,
-                        source,
-                        name_clean,
-                        brand,
-                        canonical_cat,
-                        subcategory,
-                        row["id"],
-                    )
+            conn.execute(
+                """UPDATE Product SET
+                    enrichment = ?,
+                    enrichedAt = datetime('now'),
+                    enrichmentVersion = ?,
+                    enrichmentSource = ?,
+                    nameEn = COALESCE(NULLIF(?, ''), nameEn),
+                    brand = COALESCE(NULLIF(?, ''), brand),
+                    canonicalCategory = COALESCE(NULLIF(?, ''), canonicalCategory),
+                    subcategory = COALESCE(NULLIF(?, ''), subcategory)
+                WHERE id = ?""",
+                (
+                    json.dumps(item),
+                    ENRICH_VERSION,
+                    source,
+                    name_clean,
+                    brand,
+                    canonical_cat,
+                    subcategory,
+                    row["id"],
                 )
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+def _db_save_by_id(items: list, source: str = "opencode"):
+    """Save enrichment items keyed by product_id instead of positional index."""
+    conn = get_db_rw()
+    try:
+        ids = [it["product_id"] for it in items if isinstance(it, dict) and "product_id" in it and ("name_en" in it or "name_clean" in it)]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT id FROM Product WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        row_map = {r["id"]: r for r in rows}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("product_id")
+            if not pid or pid not in row_map:
+                continue
+            if "name_en" not in item and "name_clean" not in item:
+                continue
+            name_clean = item.get("name_en") or item.get("name_clean") or None
+            brand = _normalize_brand(item.get("brand"))
+            canonical_cat = _validate_canonical_category(item.get("canonical_category"))
+            subcategory = item.get("subcategory") or None
+            conn.execute(
+                """UPDATE Product SET
+                    enrichment = ?,
+                    enrichedAt = datetime('now'),
+                    enrichmentVersion = ?,
+                    enrichmentSource = ?,
+                    nameEn = COALESCE(NULLIF(?, ''), nameEn),
+                    brand = COALESCE(NULLIF(?, ''), brand),
+                    canonicalCategory = COALESCE(NULLIF(?, ''), canonicalCategory),
+                    subcategory = COALESCE(NULLIF(?, ''), subcategory)
+                WHERE id = ?""",
+                (
+                    json.dumps(item),
+                    ENRICH_VERSION,
+                    source,
+                    name_clean,
+                    brand,
+                    canonical_cat,
+                    subcategory,
+                    pid,
+                )
+            )
         conn.commit()
     finally:
         conn.close()

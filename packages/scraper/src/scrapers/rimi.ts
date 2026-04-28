@@ -1,296 +1,259 @@
-import { Page } from "playwright";
 import { BaseScraper, ScrapedProduct } from "./base-scraper.js";
 
 /**
- * Scraper for rimi.lt/e-parduotuve — uses currentPage=N pagination
- * with SH-* category codes.
+ * Scraper for rimi.lt/e-parduotuve — sitemap-driven, HTTP-only (no browser).
+ *
+ * Stage 1: discover all LT product URLs from the public XML sitemaps.
+ * Stage 2: HTTP-GET each product page, extract structured price/name data
+ *          from the embedded JSON-LD block (server-rendered, no JS required).
+ *
+ * Advantages over the old category-page approach:
+ *  - No Playwright → no cookie wall, no zombie processes, no pagination loops
+ *  - Stable externalId: bare numeric ID from /p/{N} in URL
+ *  - Full product catalogue coverage (sitemap is authoritative)
  */
 export class RimiScraper extends BaseScraper {
-  private static BASE = "https://www.rimi.lt/e-parduotuve/lt";
+  protected requiresBrowser = false;
 
-  // Top-level category pages to crawl
-  private static CATEGORY_PAGES = [
-    "/produktai/vaisiai-darzoves-ir-geles/c/SH-2",
-    "/produktai/pieno-produktai-ir-kiausiniai/c/SH-3",
-    "/produktai/duonos-ir-konditerijos-gaminiai/c/SH-4",
-    "/produktai/mesa-vistiena-ir-zuvis/c/SH-5",
-    "/produktai/sildomieji-ir-gatavi-produktai/c/SH-19",
-    "/produktai/saldytas-maistas/c/SH-6",
-    "/produktai/bakaleja/c/SH-2-8",
-    "/produktai/gerimai/c/SH-9",
-    "/produktai/saldumynai-ir-uzkandziai/c/SH-10",
-    "/produktai/alkoholiniai-gerimai/c/SH-11",
-    "/produktai/kosmetika-ir-higiena/c/SH-12",
-    "/produktai/valymo-ir-buities-prekes/c/SH-13",
-    "/produktai/kudikiams-ir-vaikams/c/SH-14",
-    "/produktai/gyvunams/c/SH-15",
-    "/produktai/virtuvei-ir-namams/c/SH-17",
-    "/akcijos",
-  ];
+  private static SITEMAP_INDEX =
+    "https://www.rimi.lt/e-parduotuve/sitemap.xml";
+  private static CONCURRENCY = 10;
+  private static RETRY_DELAY_MS = 2000;
 
   constructor() {
     super("Rimi");
   }
 
   async scrape(): Promise<ScrapedProduct[]> {
-    const page = await this.newPage();
-    const allProducts: ScrapedProduct[] = [];
+    // ── Stage 1: collect all LT product URLs from sitemaps ──────────────────
+    this.log("Fetching sitemap index...");
+    const sitemapUrls = await this.fetchLtProductSitemapUrls();
+    this.log(`Found ${sitemapUrls.length} LT product sitemap(s)`);
 
-    try {
-      this.log("Loading main page...");
-      await page.goto(`${RimiScraper.BASE}`, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
+    const allProductUrls: string[] = [];
+    for (let i = 0; i < sitemapUrls.length; i++) {
+      this.onProgress?.({
+        categoriesTotal: sitemapUrls.length,
+        categoriesCompleted: i,
+        currentCategory: `sitemap ${i + 1}/${sitemapUrls.length}`,
       });
-      await page.waitForSelector('a[href*="/produktai/"]', { timeout: 15000 }).catch(() => {});
-      await this.delay(2000);
-      await this.dismissCookies(page);
-
-      const totalCats = RimiScraper.CATEGORY_PAGES.length;
-      for (let ci = 0; ci < totalCats; ci++) {
-        const catPath = RimiScraper.CATEGORY_PAGES[ci];
-        try {
-          const catName = this.categoryNameFromPath(catPath);
-          this.onProgress?.({ categoriesTotal: totalCats, categoriesCompleted: ci, currentCategory: catName });
-          this.log(`Scraping category: ${catName}`);
-          const catUrl = `${RimiScraper.BASE}${catPath}`;
-          const products = await this.scrapeCategory(page, catUrl, catName);
-          allProducts.push(...products);
-          await this.delay(1500 + Math.random() * 2000);
-        } catch (err) {
-          this.log(`Failed ${catPath}: ${err}`);
-        }
-      }
-      this.onProgress?.({ categoriesTotal: totalCats, categoriesCompleted: totalCats });
-    } finally {
-      await page.close();
+      const urls = await this.fetchProductUrlsFromSitemap(sitemapUrls[i]);
+      allProductUrls.push(...urls);
+      this.log(`  Sitemap ${i + 1}: ${urls.length} products (total ${allProductUrls.length})`);
     }
-
-    // Deduplicate
-    const seen = new Set<string>();
-    return allProducts.filter((p) => {
-      if (seen.has(p.externalId)) return false;
-      seen.add(p.externalId);
-      return true;
+    this.onProgress?.({
+      categoriesTotal: sitemapUrls.length,
+      categoriesCompleted: sitemapUrls.length,
+      currentCategory: "fetching product details",
     });
-  }
 
-  private async dismissCookies(page: Page): Promise<void> {
-    try {
-      const btn = page.locator(
-        'button:has-text("Naudoti tik būtinuosius"), button:has-text("Sutikti su visais"), button:has-text("Accept")'
-      );
-      if (await btn.first().isVisible({ timeout: 3000 })) {
-        await btn.first().click();
-        await this.delay(500);
-      }
-    } catch {
-      // No cookie banner
-    }
-  }
-
-  private categoryNameFromPath(path: string): string {
-    // Extract readable name from "/produktai/vaisiai-darzoves-ir-geles/c/SH-2"
-    const match = path.match(/\/produktai\/([^/]+)\//);
-    if (match) return match[1].replace(/-/g, " ");
-    if (path.includes("akcijos")) return "Akcijos";
-    return path;
-  }
-
-  private async scrapeCategory(
-    page: Page,
-    url: string,
-    categoryName: string
-  ): Promise<ScrapedProduct[]> {
+    // ── Stage 2: fetch each product page for price/name via JSON-LD ─────────
+    this.log(`Fetching details for ${allProductUrls.length} products (concurrency=${RimiScraper.CONCURRENCY})...`);
     const products: ScrapedProduct[] = [];
-    const seenIds = new Set<string>();
-    const MAX_PAGES = 50;
-    let currentPage = 1;
-    const pageSize = 80;
+    let fetched = 0;
 
-    while (currentPage <= MAX_PAGES) {
-      const pageUrl =
-        currentPage === 1
-          ? `${url}?currentPage=1&pageSize=${pageSize}`
-          : `${url}?currentPage=${currentPage}&pageSize=${pageSize}`;
+    await this.withConcurrency(allProductUrls, RimiScraper.CONCURRENCY, async (url) => {
+      const product = await this.fetchProductDetail(url);
+      if (product) {
+        products.push(product);
+      }
+      fetched++;
+      if (fetched % 200 === 0) {
+        this.log(`  Progress: ${fetched}/${allProductUrls.length} fetched, ${products.length} parsed`);
+      }
+    });
 
-      // For promo pages, use query param format
-      const finalUrl = url.includes("?")
-        ? `${url}&currentPage=${currentPage}&pageSize=${pageSize}`
-        : pageUrl;
+    this.log(`Done: ${products.length} products with prices`);
+    return products;
+  }
 
-      await page.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await page.waitForSelector('a[href*="/p/"]', { timeout: 15000 }).catch(() => {});
-      await this.delay(1500);
+  // ── Sitemap helpers ────────────────────────────────────────────────────────
 
-      // Extract products from the page.
-      // Always use the numeric ID from the /p/XXXXX URL segment — it is the only
-      // stable identifier across scrapes. data-product-code is intentionally ignored
-      // because its format ("LT-12345" vs "12345") can differ from the URL-based ID,
-      // causing the same product to be inserted twice and grow unboundedly.
-      const pageProducts = await page.$$eval(
-        'a[href*="/p/"]',
-        (links: Element[]) => {
-          const results: Array<{
-            externalId: string;
-            name: string;
-            url: string;
-            priceText: string;
-            imageUrl: string | null;
-          }> = [];
-          const seen = new Set<string>();
+  private async fetchLtProductSitemapUrls(): Promise<string[]> {
+    const xml = await this.fetchText(RimiScraper.SITEMAP_INDEX);
+    const locMatches = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)];
+    return locMatches
+      .map((m) => m[1].trim())
+      .filter((u) => u.includes("/sitemaps/products/") && u.includes("_lt_"));
+  }
 
-          for (const el of links) {
-            const href = (el as HTMLAnchorElement).href;
+  private async fetchProductUrlsFromSitemap(sitemapUrl: string): Promise<string[]> {
+    const xml = await this.fetchText(sitemapUrl);
+    const locMatches = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)];
+    return locMatches
+      .map((m) => m[1].trim())
+      .filter((u) => u.includes("/p/"));
+  }
 
-            // Stable ID: numeric segment after /p/ — skip if absent
-            const idMatch = href.match(/\/p\/(\d+)(?:[?#/]|$)/);
-            if (!idMatch) continue;
-            const externalId = idMatch[1];
-            if (seen.has(externalId)) continue;
-            seen.add(externalId);
+  // ── Product detail via JSON-LD ─────────────────────────────────────────────
 
-            // Walk up to find the product card container
-            let card: Element = el;
-            for (let i = 0; i < 6; i++) {
-              if (!card.parentElement || card.parentElement === document.body) break;
-              // Stop when parent looks like a grid (many siblings = we're at card level)
-              if (card.parentElement.children.length > 3) break;
-              card = card.parentElement;
-            }
+  private async fetchProductDetail(url: string): Promise<ScrapedProduct | null> {
+    const externalIdMatch = url.match(/\/p\/(\d+)(?:[?#/]|$)/);
+    if (!externalIdMatch) return null;
+    const externalId = externalIdMatch[1];
 
-            const img = card.querySelector("img");
-            const name = (
-              img?.alt ||
-              card.querySelector('[class*="name"], [class*="title"]')?.textContent?.trim() ||
-              el.textContent?.trim() ||
-              ""
-            ).split("\n")[0].trim().substring(0, 120);
+    // Extract top-level category from URL path
+    // URL shape: /e-parduotuve/lt/produktai/{category}/{...}/{slug}/p/{id}
+    const catMatch = url.match(/\/produktai\/([^/]+)\//);
+    const categoryLt = catMatch ? catMatch[1].replace(/-/g, " ") : undefined;
 
-            if (!name) continue;
+    try {
+      const html = await this.fetchText(url, 1);
 
-            // Clean URL: strip query params and hash
-            const cleanUrl = href.split("?")[0].split("#")[0];
+      // Extract all JSON-LD blocks
+      const ldBlocks: string[] = [];
+      const ldRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = ldRe.exec(html)) !== null) {
+        ldBlocks.push(m[1]);
+      }
 
-            results.push({
-              externalId,
-              name,
-              url: cleanUrl,
-              priceText: card.textContent || "",
-              imageUrl: img?.src || img?.getAttribute("data-src") || null,
-            });
-          }
-          return results;
-        }
-      );
+      for (const block of ldBlocks) {
+        const parsed = this.parseJsonSafe(block);
+        if (!parsed || parsed["@type"] !== "Product") continue;
 
-      if (pageProducts.length === 0) break;
+        const nameLt = (parsed.name as string | undefined)?.trim();
+        if (!nameLt) continue;
 
-      let newCount = 0;
-      for (const p of pageProducts) {
-        if (seenIds.has(p.externalId)) continue;
-        seenIds.add(p.externalId);
-        newCount++;
+        const imageUrl: string | undefined =
+          typeof parsed.image === "string"
+            ? parsed.image
+            : Array.isArray(parsed.image)
+            ? (parsed.image[0] as string)
+            : undefined;
 
-        const prices = this.parsePriceText(p.priceText);
-        const weight = this.extractWeight(p.name);
+        const brand: string | undefined =
+          typeof parsed.brand === "object" && parsed.brand !== null
+            ? (parsed.brand as { name?: string }).name
+            : undefined;
 
-        products.push({
-          externalId: p.externalId,
-          nameLt: p.name,
-          categoryLt: categoryName,
-          productUrl: p.url,
-          imageUrl: p.imageUrl || undefined,
+        const offers = Array.isArray(parsed.offers)
+          ? (parsed.offers as unknown[])
+          : parsed.offers
+          ? [parsed.offers]
+          : [];
+
+        const prices = this.extractPrices(offers);
+        if (!prices || prices.regularPrice <= 0) continue;
+
+        const weight = this.extractWeight(nameLt);
+
+        const cleanUrl = url.split("?")[0].split("#")[0];
+
+        return {
+          externalId,
+          nameLt,
+          categoryLt,
+          brand,
+          productUrl: cleanUrl,
+          imageUrl,
           weightValue: weight?.value,
           weightUnit: weight?.unit,
           ...prices,
-        });
+        };
       }
 
-      if (newCount === 0) break;
-
-      currentPage++;
-      await this.delay(1000);
+      return null;
+    } catch {
+      return null;
     }
-
-    return products.filter((p) => p.regularPrice > 0);
   }
 
-  private parsePriceText(text: string): {
+  private extractPrices(offers: unknown[]): {
     regularPrice: number;
     salePrice?: number;
     unitPrice?: number;
     unitLabel?: string;
     campaignText?: string;
-  } {
-    let regularPrice = 0;
-    let salePrice: number | undefined;
-    let unitPrice: number | undefined;
-    let unitLabel: string | undefined;
-    let campaignText: string | undefined;
+  } | null {
+    if (offers.length === 0) return null;
 
-    // 1. Strip deposit text (e.g. "Užstatas už tarą: 0,10 €")
-    const noDeposit = text.replace(/[Uu]žstatas[^€]+€/g, "");
-
-    // 2. Extract weight/volume unit price from original text — use last occurrence
-    //    so a sale item's regular unit price (not the sale unit price) wins.
-    const weightUnitMatches = [
-      ...text.matchAll(/(\d+[.,]\d+)\s*€\s*\/\s*(kg|l|ml|gab)/gi),
-    ];
-    if (weightUnitMatches.length > 0) {
-      const last = weightUnitMatches[weightUnitMatches.length - 1];
-      unitPrice = parseFloat(last[1].replace(",", "."));
-      unitLabel = `€/${last[2]}`;
-    }
-
-    // 3. Build cleaned text:
-    //    - Remove ALL weight/volume unit prices (global replace, not just first)
-    //    - Normalise per-piece unit labels ("€/vnt.", "€/pcs.") → "€" so that
-    //      Rimi's split-layout price "2\n49\n€/vnt." becomes "2\n49\n€"
-    const cleaned = noDeposit
-      .replace(/\d+[.,]\d+\s*€\s*\/\s*(kg|l|ml|gab)/gi, "")
-      .replace(/€\s*\/\s*(vnt\.?|pcs\.?)/gi, "€");
-
-    // 4. Collect package prices in text order.
-    //    Format A: "1,99 €" / "1.99 €"  — standard decimal
-    //    Format B: "1 99 €" / "1\n99 €" — Rimi split layout (euros + 2-digit cents)
-    const priceEntries: Array<{ value: number; index: number }> = [];
-
-    // Split format first
-    const splitRe = /\b(\d+)\s+(\d{2})\s*€/g;
-    let m: RegExpExecArray | null;
-    while ((m = splitRe.exec(cleaned)) !== null) {
-      priceEntries.push({ value: parseFloat(`${m[1]}.${m[2]}`), index: m.index });
-    }
-
-    // Decimal format — skip positions already covered by a split match
-    const decRe = /(\d+[.,]\d+)\s*€/g;
-    while ((m = decRe.exec(cleaned)) !== null) {
-      const covered = priceEntries.some((e) => Math.abs(e.index - m!.index) < 6);
-      if (!covered) {
-        priceEntries.push({
-          value: parseFloat(m[1].replace(",", ".")),
-          index: m.index,
-        });
+    const prices: number[] = [];
+    for (const offer of offers) {
+      if (typeof offer !== "object" || offer === null) continue;
+      const o = offer as Record<string, unknown>;
+      if (typeof o.price === "number" && o.price > 0) {
+        prices.push(o.price);
+      } else if (typeof o.price === "string") {
+        const v = parseFloat(o.price);
+        if (!isNaN(v) && v > 0) prices.push(v);
       }
     }
 
-    priceEntries.sort((a, b) => a.index - b.index);
-    const prices = priceEntries.map((e) => e.value);
+    if (prices.length === 0) return null;
 
-    // 5. Assign prices: first = sale (if two found), last = regular
-    if (prices.length >= 1) regularPrice = prices[0];
-    if (prices.length >= 2) {
-      salePrice = prices[0];
-      regularPrice = prices[prices.length - 1];
+    const regularPrice = Math.max(...prices);
+    const minPrice = Math.min(...prices);
+    const salePrice = minPrice < regularPrice ? minPrice : undefined;
+
+    return { regularPrice, salePrice };
+  }
+
+  // ── Utilities ──────────────────────────────────────────────────────────────
+
+  private async fetchText(url: string, retries = 1): Promise<string> {
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept-Language": "lt-LT,lt;q=0.9",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    };
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(url, { headers });
+        if (res.ok) return await res.text();
+        if (res.status === 429 && attempt < retries) {
+          await this.delay(RimiScraper.RETRY_DELAY_MS * (attempt + 1));
+          continue;
+        }
+        return "";
+      } catch {
+        if (attempt < retries) {
+          await this.delay(RimiScraper.RETRY_DELAY_MS);
+          continue;
+        }
+        return "";
+      }
     }
+    return "";
+  }
 
-    // 6. Campaign text
-    const campMatch = text.match(
-      /([–-]\d+\s*%|\d+\s*\+\s*\d+|tik\s+[\d.,]+\s*€)/i
-    );
-    if (campMatch) campaignText = campMatch[0];
+  private parseJsonSafe(text: string): Record<string, unknown> | null {
+    try {
+      const val = JSON.parse(text.trim());
+      return typeof val === "object" && val !== null ? (val as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }
 
-    return { regularPrice, salePrice, unitPrice, unitLabel, campaignText };
+  private async withConcurrency<T>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<void>
+  ): Promise<void> {
+    const queue = [...items];
+    let active = 0;
+
+    await new Promise<void>((resolve, reject) => {
+      const next = () => {
+        if (queue.length === 0 && active === 0) {
+          resolve();
+          return;
+        }
+        while (active < limit && queue.length > 0) {
+          const item = queue.shift()!;
+          active++;
+          fn(item)
+            .then(() => {
+              active--;
+              next();
+            })
+            .catch(reject);
+        }
+      };
+      next();
+    });
   }
 }

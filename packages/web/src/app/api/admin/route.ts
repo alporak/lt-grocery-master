@@ -191,11 +191,6 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "enrich-all") {
-    // Clear enrichedAt on all products so they get re-enriched
-    const updated = await prisma.product.updateMany({
-      data: { enrichment: null, enrichedAt: null },
-    });
-
     // Trigger the bulk-enrich background worker (respects Ollama settings)
     const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
     const ollamaConfig = await getOllamaConfig();
@@ -220,7 +215,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      productsCleared: updated.count,
       enrichResult,
     });
   }
@@ -435,6 +429,27 @@ export async function POST(req: NextRequest) {
           });
           if (res.ok) {
             results.enrich = await res.json();
+
+            // Poll for enrichment completion (up to 10 minutes)
+            const pollStart = Date.now();
+            const deadline = pollStart + 600_000;
+            while (Date.now() < deadline) {
+              await new Promise((r) => setTimeout(r, 3000));
+              try {
+                const statusRes = await fetch(`${embedderUrl}/bulk-enrich/status`, {
+                  signal: AbortSignal.timeout(5000),
+                });
+                if (statusRes.ok) {
+                  const status = await statusRes.json();
+                  if (!status.running) {
+                    results.enrich = results.enrich ? { ...(results.enrich as Record<string, unknown>), status } : { status };
+                    break;
+                  }
+                }
+              } catch {
+                // keep polling
+              }
+            }
           } else {
             results.enrich = { error: `Embedder returned ${res.status}` };
           }
@@ -463,6 +478,13 @@ export async function POST(req: NextRequest) {
         },
       });
 
+      // Signal scraper to commit + push the updated database
+      await prisma.settings.upsert({
+        where: { key: "dataSyncRequested" },
+        update: { value: new Date().toISOString() },
+        create: { key: "dataSyncRequested", value: new Date().toISOString() },
+      });
+
       return NextResponse.json({ success: true, phases: selected, results });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -489,6 +511,73 @@ export async function POST(req: NextRequest) {
   if (action === "dedup") {
     const result = await doDeduplicateProducts();
     return NextResponse.json({ success: true, ...result });
+  }
+
+  if (action === "enrich-post") {
+    // Post-enrichment: re-embed enriched products + group + sync
+    const embedderUrl = process.env.EMBEDDER_URL || "http://embedder:8000";
+    const count: number = typeof body.count === "number" ? body.count : 20;
+    const results: Record<string, unknown> = {};
+
+    await updatePipelineState("post-enrich");
+
+    try {
+      const res = await fetch(`${embedderUrl}/enrich/reembed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ count }),
+        signal: AbortSignal.timeout(600000),
+      });
+      results.reembed = res.ok ? await res.json() : { error: `Embedder returned ${res.status}` };
+    } catch {
+      results.reembed = { error: "Embedder service not available" };
+    }
+
+    try {
+      const res = await fetch(`${embedderUrl}/group`, {
+        method: "POST",
+        signal: AbortSignal.timeout(300000),
+      });
+      results.group = res.ok ? await res.json() : { error: `Embedder returned ${res.status}` };
+    } catch {
+      results.group = { error: "Group service not available" };
+    }
+
+    await prisma.settings.upsert({
+      where: { key: "pipelineState" },
+      update: {
+        value: JSON.stringify({
+          trigger: "manual-phases",
+          status: "done",
+          startedAt: new Date().toISOString(),
+          phases: ["enrich"],
+          finishedAt: new Date().toISOString(),
+          error: null,
+          updatedAt: new Date().toISOString(),
+        }),
+      },
+      create: {
+        key: "pipelineState",
+        value: JSON.stringify({ status: "done" }),
+      },
+    });
+
+    await prisma.settings.upsert({
+      where: { key: "dataSyncRequested" },
+      update: { value: new Date().toISOString() },
+      create: { key: "dataSyncRequested", value: new Date().toISOString() },
+    });
+
+    return NextResponse.json({ success: true, results });
+  }
+
+  if (action === "sync-data") {
+    await prisma.settings.upsert({
+      where: { key: "dataSyncRequested" },
+      update: { value: new Date().toISOString() },
+      create: { key: "dataSyncRequested", value: new Date().toISOString() },
+    });
+    return NextResponse.json({ success: true });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });

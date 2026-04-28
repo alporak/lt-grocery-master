@@ -7,3 +7,4 @@ data/embeddings/
 .env
 *.log
 packages/data/grocery.db
+.claude/*

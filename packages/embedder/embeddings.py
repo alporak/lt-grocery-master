@@ -105,6 +105,8 @@ def _embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> np.
 
 
 def _build_composite_text(row) -> str:
+    if not isinstance(row, dict):
+        row = dict(row)
     if row.get("enrichment"):
         try:
             enr = json.loads(row["enrichment"]) if isinstance(row["enrichment"], str) else row["enrichment"]

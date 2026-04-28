@@ -4,6 +4,9 @@ set -e
 # Ensure data directory is writable by nextjs user
 chown nextjs:nodejs /app/data
 
+# Fix ownership of database and WAL/SHM files (may be created by other containers)
+chown nextjs:nodejs /app/data/grocery.db* 2>/dev/null || true
+
 # Initialize database from template if volume is empty or DB is invalid
 if [ ! -s /app/data/grocery.db ]; then
   echo "Initializing database from template..."
