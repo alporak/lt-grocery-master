@@ -30,9 +30,9 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 
 ### Domain-Agnostic Deployment
 
-- [ ] **DEPLOY-01**: PUBLIC_URL env var drives all dynamic URL references (no hardcoded domain)
-- [ ] **DEPLOY-02**: Docker Compose updated with new env vars (PUBLIC_URL, NEXT_PUBLIC_ADSENSE_ID)
-- [ ] **DEPLOY-03**: App deploys on new domain by changing only env vars in docker-compose.yml
+- [x] **DEPLOY-01**: PUBLIC_URL env var drives all dynamic URL references (no hardcoded domain)
+- [x] **DEPLOY-02**: Docker Compose updated with new env vars (PUBLIC_URL, NEXT_PUBLIC_ADSENSE_ID)
+- [x] **DEPLOY-03**: App deploys on new domain by changing only env vars in docker-compose.yml
 
 ## Out of Scope
 
@@ -62,9 +62,9 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 | ADS-06 | Phase 6 | Complete |
 | ADS-07 | Phase 6 | Complete |
 | ADS-08 | Phase 6 | Complete |
-| DEPLOY-01 | Phase 7 | Pending |
-| DEPLOY-02 | Phase 7 | Pending |
-| DEPLOY-03 | Phase 7 | Pending |
+| DEPLOY-01 | Phase 7 | Complete |
+| DEPLOY-02 | Phase 7 | Complete |
+| DEPLOY-03 | Phase 7 | Complete |
 
 **Coverage:**
 - v2.0 requirements: 18 total
