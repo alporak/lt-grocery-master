@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "./i18n-provider";
+import { Logo } from "./logo";
 
 // Desktop sidebar: 6 items
 const sideNavItems = [
@@ -63,7 +64,10 @@ export function Sidebar() {
     <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 border-r bg-card">
       <div className="flex flex-col flex-1 min-h-0">
         <div className="flex items-center h-16 px-4 border-b">
-          <span className="text-xl font-bold text-primary">🛒 {t("common.appName")}</span>
+          <span className="text-xl font-bold text-primary flex items-center gap-2">
+            <Logo size={20} />
+            {t("common.appName")}
+          </span>
         </div>
         <nav className="flex-1 px-2 py-4 space-y-1">
           {sideNavItems.map((item) => {
