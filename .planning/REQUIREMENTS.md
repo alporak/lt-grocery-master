@@ -19,14 +19,14 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 
 ### AdSense Integration
 
-- [ ] **ADS-01**: Google AdSense integrated in AdBanner component
-- [ ] **ADS-02**: Google AdSense integrated in AdLeaderboard component
-- [ ] **ADS-03**: Google AdSense integrated in AdNativeCard component
-- [ ] **ADS-04**: Google AdSense integrated in AdSideRail component
-- [ ] **ADS-05**: Google AdSense integrated in AdSponsoredRow component
-- [ ] **ADS-06**: AdSense publisher ID configurable via NEXT_PUBLIC_ADSENSE_ID env var
-- [ ] **ADS-07**: Ads only render when publisher ID is configured (no hardcoded fallback)
-- [ ] **ADS-08**: GDPR-compliant consent banner shown before ads load
+- [x] **ADS-01**: Google AdSense integrated in AdBanner component
+- [x] **ADS-02**: Google AdSense integrated in AdLeaderboard component
+- [x] **ADS-03**: Google AdSense integrated in AdNativeCard component
+- [x] **ADS-04**: Google AdSense integrated in AdSideRail component
+- [x] **ADS-05**: Google AdSense integrated in AdSponsoredRow component
+- [x] **ADS-06**: AdSense publisher ID configurable via NEXT_PUBLIC_ADSENSE_ID env var
+- [x] **ADS-07**: Ads only render when publisher ID is configured (no hardcoded fallback)
+- [x] **ADS-08**: GDPR-compliant consent banner shown before ads load
 
 ### Domain-Agnostic Deployment
 
@@ -54,14 +54,14 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 | BRAND-05 | Phase 5 | Complete |
 | BRAND-06 | Phase 5 | Complete |
 | BRAND-07 | Phase 5 | Complete |
-| ADS-01 | Phase 6 | Pending |
-| ADS-02 | Phase 6 | Pending |
-| ADS-03 | Phase 6 | Pending |
-| ADS-04 | Phase 6 | Pending |
-| ADS-05 | Phase 6 | Pending |
-| ADS-06 | Phase 6 | Pending |
-| ADS-07 | Phase 6 | Pending |
-| ADS-08 | Phase 6 | Pending |
+| ADS-01 | Phase 6 | Complete |
+| ADS-02 | Phase 6 | Complete |
+| ADS-03 | Phase 6 | Complete |
+| ADS-04 | Phase 6 | Complete |
+| ADS-05 | Phase 6 | Complete |
+| ADS-06 | Phase 6 | Complete |
+| ADS-07 | Phase 6 | Complete |
+| ADS-08 | Phase 6 | Complete |
 | DEPLOY-01 | Phase 7 | Pending |
 | DEPLOY-02 | Phase 7 | Pending |
 | DEPLOY-03 | Phase 7 | Pending |
