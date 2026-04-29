@@ -78,38 +78,38 @@ Deferred to future release. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TUNN-01 | — | Pending |
-| TUNN-02 | — | Pending |
-| TUNN-03 | — | Pending |
-| TUNN-04 | — | Pending |
-| TUNN-05 | — | Pending |
-| TUNN-06 | — | Pending |
-| ADSN-01 | — | Pending |
-| ADSN-02 | — | Pending |
-| ADSN-03 | — | Pending |
-| ADSN-04 | — | Pending |
-| ADSN-05 | — | Pending |
-| HRDN-01 | — | Pending |
-| HRDN-02 | — | Pending |
-| HRDN-03 | — | Pending |
-| HRDN-04 | — | Pending |
-| HRDN-05 | — | Pending |
-| HRDN-06 | — | Pending |
-| HRDN-07 | — | Pending |
-| HRDN-08 | — | Pending |
-| HRDN-09 | — | Pending |
-| HRDN-10 | — | Pending |
-| VERF-01 | — | Pending |
-| VERF-02 | — | Pending |
-| VERF-03 | — | Pending |
-| VERF-04 | — | Pending |
-| VERF-05 | — | Pending |
-| VERF-06 | — | Pending |
+| TUNN-01 | Phase 8 | Pending |
+| TUNN-02 | Phase 8 | Pending |
+| TUNN-03 | Phase 8 | Pending |
+| TUNN-04 | Phase 8 | Pending |
+| TUNN-05 | Phase 8 | Pending |
+| TUNN-06 | Phase 8 | Pending |
+| ADSN-01 | Phase 9 | Pending |
+| ADSN-02 | Phase 9 | Pending |
+| ADSN-03 | Phase 9 | Pending |
+| ADSN-04 | Phase 9 | Pending |
+| ADSN-05 | Phase 9 | Pending |
+| HRDN-01 | Phase 10 | Pending |
+| HRDN-02 | Phase 10 | Pending |
+| HRDN-03 | Phase 10 | Pending |
+| HRDN-04 | Phase 10 | Pending |
+| HRDN-05 | Phase 10 | Pending |
+| HRDN-06 | Phase 10 | Pending |
+| HRDN-07 | Phase 10 | Pending |
+| HRDN-08 | Phase 10 | Pending |
+| HRDN-09 | Phase 10 | Pending |
+| HRDN-10 | Phase 10 | Pending |
+| VERF-01 | Phase 11 | Pending |
+| VERF-02 | Phase 11 | Pending |
+| VERF-03 | Phase 11 | Pending |
+| VERF-04 | Phase 11 | Pending |
+| VERF-05 | Phase 11 | Pending |
+| VERF-06 | Phase 11 | Pending |
 
 **Coverage:**
 - v3.0 requirements: 27 total
-- Mapped to phases: 0
-- Unmapped: 27 ⚠️
+- Mapped to phases: 27
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-04-29*
