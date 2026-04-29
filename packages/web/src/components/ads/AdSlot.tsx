@@ -5,9 +5,10 @@ import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/components/i18n-provider";
 
+const PUBLISHER_ID = process.env.NEXT_PUBLIC_ADSENSE_ID;
+
 function useAdblockDetect(): boolean {
   const [blocked, setBlocked] = useState(false);
-  const baitRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const bait = document.createElement("div");
@@ -15,7 +16,6 @@ function useAdblockDetect(): boolean {
     bait.style.cssText = "position:absolute;left:-9999px;width:2px;height:2px;";
     bait.innerHTML = "&nbsp;";
     document.body.appendChild(bait);
-    baitRef.current = bait;
 
     const check = () => {
       if (!bait.offsetParent || bait.offsetHeight === 0 || getComputedStyle(bait).display === "none") {
@@ -46,6 +46,7 @@ function useDismiss(slotId: string): [boolean, () => void] {
 
 function AdLabel() {
   const { t } = useI18n();
+  if (!PUBLISHER_ID) return null;
   return (
     <span className="font-mono text-[8px] uppercase tracking-wider text-muted-foreground border border-border rounded px-1 py-px bg-background/50">
       {t("ads.label")}
@@ -53,22 +54,49 @@ function AdLabel() {
   );
 }
 
-function BegCopy({ blocked, size = "sm" }: { blocked: boolean; size?: "sm" | "md" | "lg" }) {
+function AdUnit({
+  slotId,
+  format,
+  blocked,
+  className,
+}: {
+  slotId: string;
+  format?: string;
+  blocked: boolean;
+  className?: string;
+}) {
   const { t } = useI18n();
-  const key = blocked ? "ads.pleaseWhitelistDesperate" : "ads.pleaseWhitelist";
-  const cls = size === "lg" ? "text-sm" : size === "md" ? "text-xs" : "text-[11px]";
-  return <p className={cn(cls, "leading-snug text-muted-foreground")}>{t(key)}</p>;
-}
+  const ref = useRef<HTMLModElement>(null);
 
-function HatchImg({ className }: { className?: string }) {
+  useEffect(() => {
+    if (blocked || !PUBLISHER_ID) return;
+    try {
+      (window as unknown as { adsbygoogle?: unknown[] }).adsbygoogle = (window as unknown as { adsbygoogle?: unknown[] }).adsbygoogle || [];
+      ((window as unknown as { adsbygoogle: unknown[] }).adsbygoogle as unknown[]).push({});
+    } catch {
+      // AdSense not available (adblock, no script loaded, etc.)
+    }
+  }, [blocked]);
+
+  if (!PUBLISHER_ID) return null;
+
+  if (blocked) {
+    return (
+      <p className="text-xs text-muted-foreground leading-snug">
+        {t("ads.adblockNotice")}
+      </p>
+    );
+  }
+
   return (
-    <div
-      className={cn("border border-border rounded-sm bg-muted/40", className)}
-      style={{
-        backgroundImage:
-          "repeating-linear-gradient(45deg, currentColor 0 1px, transparent 1px 10px)",
-        color: "hsl(var(--border))",
-      }}
+    <ins
+      ref={ref}
+      className={cn("adsbygoogle", className)}
+      style={{ display: "block" }}
+      data-ad-client={`ca-${PUBLISHER_ID}`}
+      data-ad-slot={slotId}
+      data-ad-format={format || "auto"}
+      data-full-width-responsive="true"
     />
   );
 }
@@ -94,6 +122,7 @@ function useAdState(slotId: string) {
 export function AdBanner({ small, className, slotId = "banner" }: { small?: boolean; className?: string; slotId?: string }) {
   const { blocked, dismissed, dismiss } = useAdState(slotId);
   if (dismissed) return null;
+  if (!PUBLISHER_ID && !blocked) return null;
   return (
     <div
       className={cn(
@@ -102,9 +131,8 @@ export function AdBanner({ small, className, slotId = "banner" }: { small?: bool
         className,
       )}
     >
-      <HatchImg className={cn("shrink-0", small ? "w-8 h-8" : "w-10 h-10")} />
       <div className="flex-1 min-w-0">
-        <BegCopy blocked={blocked} size={small ? "sm" : "md"} />
+        <AdUnit slotId={slotId} blocked={blocked} />
       </div>
       <AdLabel />
       <DismissBtn onClick={dismiss} />
@@ -115,11 +143,11 @@ export function AdBanner({ small, className, slotId = "banner" }: { small?: bool
 export function AdLeaderboard({ className, slotId = "leaderboard" }: { className?: string; slotId?: string }) {
   const { blocked, dismissed, dismiss } = useAdState(slotId);
   if (dismissed) return null;
+  if (!PUBLISHER_ID && !blocked) return null;
   return (
     <div className={cn("relative flex items-center gap-4 border border-border rounded-md bg-muted/30 h-16 px-4", className)}>
-      <HatchImg className="w-10 h-10 shrink-0" />
       <div className="flex-1 min-w-0">
-        <BegCopy blocked={blocked} size="md" />
+        <AdUnit slotId={slotId} blocked={blocked} />
       </div>
       <AdLabel />
       <DismissBtn onClick={dismiss} />
@@ -130,11 +158,11 @@ export function AdLeaderboard({ className, slotId = "leaderboard" }: { className
 export function AdNativeCard({ className, slotId = "native" }: { className?: string; slotId?: string }) {
   const { blocked, dismissed, dismiss } = useAdState(slotId);
   if (dismissed) return null;
+  if (!PUBLISHER_ID && !blocked) return null;
   return (
     <div className={cn("relative flex flex-col border border-dashed border-border rounded-lg bg-card overflow-hidden", className)}>
-      <HatchImg className="flex-1 rounded-none border-0 border-b border-dashed min-h-[96px]" />
-      <div className="p-3">
-        <BegCopy blocked={blocked} size="sm" />
+      <div className="flex-1 min-h-[96px] flex items-center justify-center p-4">
+        <AdUnit slotId={slotId} format="rectangle" blocked={blocked} />
       </div>
       <div className="absolute top-2 left-2"><AdLabel /></div>
       <DismissBtn onClick={dismiss} />
@@ -145,11 +173,13 @@ export function AdNativeCard({ className, slotId = "native" }: { className?: str
 export function AdSideRail({ className, slotId = "siderail" }: { className?: string; slotId?: string }) {
   const { blocked, dismissed, dismiss } = useAdState(slotId);
   if (dismissed) return null;
+  if (!PUBLISHER_ID && !blocked) return null;
   return (
     <div className={cn("relative border border-border rounded-md bg-card p-3", className)}>
       <div className="absolute top-2 right-2"><AdLabel /></div>
-      <HatchImg className="w-full h-24 mb-2" />
-      <BegCopy blocked={blocked} size="sm" />
+      <div className="min-h-[250px]">
+        <AdUnit slotId={slotId} format="vertical" blocked={blocked} />
+      </div>
       <DismissBtn onClick={dismiss} />
     </div>
   );
@@ -158,11 +188,11 @@ export function AdSideRail({ className, slotId = "siderail" }: { className?: str
 export function AdSponsoredRow({ className, slotId = "sponsoredrow" }: { className?: string; slotId?: string }) {
   const { blocked, dismissed, dismiss } = useAdState(slotId);
   if (dismissed) return null;
+  if (!PUBLISHER_ID && !blocked) return null;
   return (
     <div className={cn("relative flex items-center gap-3 px-3 py-2.5 border border-dashed border-border rounded-md bg-muted/20", className)}>
-      <HatchImg className="w-8 h-8 shrink-0" />
       <div className="flex-1 min-w-0">
-        <BegCopy blocked={blocked} size="sm" />
+        <AdUnit slotId={slotId} blocked={blocked} />
       </div>
       <AdLabel />
       <DismissBtn onClick={dismiss} />
