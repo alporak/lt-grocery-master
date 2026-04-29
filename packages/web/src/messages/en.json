@@ -70,8 +70,11 @@
   },
   "ads": {
     "label": "AD · sponsored",
-    "pleaseWhitelist": "No ads loaded yet 🙈 please whitelist us so we can keep tracking prices for free 🙏✨",
-    "pleaseWhitelistDesperate": "😭 adblock detected — we're dying over here, please whitelist us, we beg 🥺💀"
+    "pleaseWhitelist": "Ads help keep Krepza free. Consider disabling your adblocker.",
+    "pleaseWhitelistDesperate": "Ads help keep Krepza free. Consider disabling your adblocker.",
+    "consentText": "This site uses ads to stay free. By accepting, you allow personalized ads.",
+    "consentAccept": "Accept",
+    "adblockNotice": "Ads help keep Krepza free. Consider disabling your adblocker."
   },
   "dashboard": {
     "title": "Dashboard",

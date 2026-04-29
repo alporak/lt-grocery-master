@@ -70,8 +70,11 @@
   },
   "ads": {
     "label": "REKLAMA · rėmėjas",
-    "pleaseWhitelist": "Kol kas reklamos nepakrautos 🙈 prašome pridėti mus į adblock baltąjį sąrašą — taip galėsim toliau veltui stebėti kainas 🙏✨",
-    "pleaseWhitelistDesperate": "😭 adblock įjungtas — mes mirštame, prašome išjungti, maldaujam 🥺💀"
+    "pleaseWhitelist": "Reklamos padeda išlaikyti Krepza nemokamą. Apsvarstykite galimybę išjungti reklamų blokatorių.",
+    "pleaseWhitelistDesperate": "Reklamos padeda išlaikyti Krepza nemokamą. Apsvarstykite galimybę išjungti reklamų blokatorių.",
+    "consentText": "Ši svetainė naudoja reklamas, kad liktų nemokama. Sutikdami leidžiate personalizuotas reklamas.",
+    "consentAccept": "Sutinku",
+    "adblockNotice": "Reklamos padeda išlaikyti Krepza nemokamą. Apsvarstykite galimybę išjungti reklamų blokatorių."
   },
   "dashboard": {
     "title": "Pradžia",

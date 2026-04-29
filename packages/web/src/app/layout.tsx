@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import { ClientProviders } from "@/components/client-providers";
 
@@ -25,6 +26,13 @@ export default function RootLayout({
   return (
     <html lang="lt" suppressHydrationWarning>
       <body className={inter.className}>
+        {process.env.NEXT_PUBLIC_ADSENSE_ID && (
+          <Script
+            src={`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-${process.env.NEXT_PUBLIC_ADSENSE_ID}`}
+            strategy="afterInteractive"
+            crossOrigin="anonymous"
+          />
+        )}
         <ClientProviders>{children}</ClientProviders>
       </body>
     </html>

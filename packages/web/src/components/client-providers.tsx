@@ -7,6 +7,7 @@ import { I18nProvider, useI18n } from "./i18n-provider";
 import { Sidebar, BottomNav } from "./navigation";
 import { LanguageSwitcher } from "./language-switcher";
 import { AuthButton } from "./auth-button";
+import { ConsentBanner } from "./consent-banner";
 
 export function ClientProviders({ children }: { children: ReactNode }) {
   const { t } = useI18n();
@@ -34,6 +35,7 @@ export function ClientProviders({ children }: { children: ReactNode }) {
           </div>
           <BottomNav />
         </div>
+        <ConsentBanner />
         </I18nProvider>
       </ThemeProvider>
     </SessionProvider>
