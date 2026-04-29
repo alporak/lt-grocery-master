@@ -47,29 +47,29 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BRAND-01 | — | Pending |
-| BRAND-02 | — | Pending |
-| BRAND-03 | — | Pending |
-| BRAND-04 | — | Pending |
-| BRAND-05 | — | Pending |
-| BRAND-06 | — | Pending |
-| BRAND-07 | — | Pending |
-| ADS-01 | — | Pending |
-| ADS-02 | — | Pending |
-| ADS-03 | — | Pending |
-| ADS-04 | — | Pending |
-| ADS-05 | — | Pending |
-| ADS-06 | — | Pending |
-| ADS-07 | — | Pending |
-| ADS-08 | — | Pending |
-| DEPLOY-01 | — | Pending |
-| DEPLOY-02 | — | Pending |
-| DEPLOY-03 | — | Pending |
+| BRAND-01 | Phase 5 | Pending |
+| BRAND-02 | Phase 5 | Pending |
+| BRAND-03 | Phase 5 | Pending |
+| BRAND-04 | Phase 5 | Pending |
+| BRAND-05 | Phase 5 | Pending |
+| BRAND-06 | Phase 5 | Pending |
+| BRAND-07 | Phase 5 | Pending |
+| ADS-01 | Phase 6 | Pending |
+| ADS-02 | Phase 6 | Pending |
+| ADS-03 | Phase 6 | Pending |
+| ADS-04 | Phase 6 | Pending |
+| ADS-05 | Phase 6 | Pending |
+| ADS-06 | Phase 6 | Pending |
+| ADS-07 | Phase 6 | Pending |
+| ADS-08 | Phase 6 | Pending |
+| DEPLOY-01 | Phase 7 | Pending |
+| DEPLOY-02 | Phase 7 | Pending |
+| DEPLOY-03 | Phase 7 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 18 total
-- Mapped to phases: 0
-- Unmapped: 18 ⚠️
+- Mapped to phases: 18
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-04-29*
