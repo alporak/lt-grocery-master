@@ -9,13 +9,13 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 
 ### Branding
 
-- [ ] **BRAND-01**: User sees "Krepza" as the app name in all i18n strings (en.json, lt.json)
-- [ ] **BRAND-02**: Browser tab/title shows "Krepza - Price Checker" in layout metadata
-- [ ] **BRAND-03**: Mobile header displays "Krepza" branding (replace hardcoded "LT Grocery")
-- [ ] **BRAND-04**: Privacy policy and data deletion pages reflect Krepza branding
-- [ ] **BRAND-05**: Scraper User-Agent header updated to "krepza/2.0"
-- [ ] **BRAND-06**: Favicon and app icons served from assets/logo/ (favicon.ico, icon.png, icon.svg)
-- [ ] **BRAND-07**: Krepza logo SVG displayed in desktop sidebar branding area
+- [x] **BRAND-01**: User sees "Krepza" as the app name in all i18n strings (en.json, lt.json)
+- [x] **BRAND-02**: Browser tab/title shows "Krepza - Price Checker" in layout metadata
+- [x] **BRAND-03**: Mobile header displays "Krepza" branding (replace hardcoded "LT Grocery")
+- [x] **BRAND-04**: Privacy policy and data deletion pages reflect Krepza branding
+- [x] **BRAND-05**: Scraper User-Agent header updated to "krepza/2.0"
+- [x] **BRAND-06**: Favicon and app icons served from assets/logo/ (favicon.ico, icon.png, icon.svg)
+- [x] **BRAND-07**: Krepza logo SVG displayed in desktop sidebar branding area
 
 ### AdSense Integration
 
@@ -47,13 +47,13 @@ Requirements for v2.0 Krepza Rebrand + Ad Monetization.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BRAND-01 | Phase 5 | Pending |
-| BRAND-02 | Phase 5 | Pending |
-| BRAND-03 | Phase 5 | Pending |
-| BRAND-04 | Phase 5 | Pending |
-| BRAND-05 | Phase 5 | Pending |
-| BRAND-06 | Phase 5 | Pending |
-| BRAND-07 | Phase 5 | Pending |
+| BRAND-01 | Phase 5 | Complete |
+| BRAND-02 | Phase 5 | Complete |
+| BRAND-03 | Phase 5 | Complete |
+| BRAND-04 | Phase 5 | Complete |
+| BRAND-05 | Phase 5 | Complete |
+| BRAND-06 | Phase 5 | Complete |
+| BRAND-07 | Phase 5 | Complete |
 | ADS-01 | Phase 6 | Pending |
 | ADS-02 | Phase 6 | Pending |
 | ADS-03 | Phase 6 | Pending |
