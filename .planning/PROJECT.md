@@ -24,13 +24,14 @@ User logs in with one click (Google/Facebook) and their grocery lists follow the
 - ✓ Conflict handling on simultaneous edits — v1.0
 - ✓ Session management page — v1.0
 - ✓ Account linking (same email via multiple providers) — v1.0
+- ✓ Full rebrand to "Krepza" (i18n, metadata, logos, static pages) — v2.0
+- ✓ Google AdSense across 5 ad component types — v2.0
+- ✓ GDPRed consent banner before ads — v2.0
+- ✓ Domain-agnostic deployment via env vars — v2.0
 
 ### Active
 
-- [ ] Full rebrand from "LT Grocery" to "Krepza" (i18n, metadata, layout, favicons, static pages)
-- [ ] Google AdSense integration across all existing ad slots (5 types, 9 pages)
-- [ ] Domain-agnostic deployment (env-var-driven, no hardcoded URLs)
-- [ ] Updated privacy and data deletion pages with Krepza branding
+(None — start new milestone for fresh scope)
 
 ### Out of Scope
 
@@ -44,13 +45,13 @@ User logs in with one click (Google/Facebook) and their grocery lists follow the
 
 - Next.js 14 App Router, Prisma + SQLite, Docker multi-service (web/scraper/embedder)
 - next-auth@4 with JWT strategy, Prisma adapter for user/account persistence
-- 17 new files created across auth, data isolation, sync, and session management layers
 - Single `NEXTAUTH_URL` env var controls all OAuth redirects — works on any domain
 - Device session tracking via User-Agent parsing + DeviceSession model
 - SSE + polling for cross-device list sync with optimistic concurrency
-- Placeholder ad components exist (5 types across 9 pages) — need real AdSense wiring
-- Brand logos in assets/logo/ (icon.svg, icon.png, icon.ico, icon.icns, favicon.ico, Krepza-Logo.svg)
-- App name referenced in 10+ locations: i18n JSON (en.json, lt.json), layout metadata, client-providers header, privacy/TOS pages
+- Google AdSense integrated via next/script with GDPR consent banner
+- Krepza logo as inline SVG component (matching lucide-react pattern)
+- Ad components conditionally rendered via NEXT_PUBLIC_ADSENSE_ID env var
+- ~6 new files created: logo.tsx, consent-banner.tsx, plus asset files in public/
 
 ## Constraints
 
@@ -71,16 +72,10 @@ User logs in with one click (Google/Facebook) and their grocery lists follow the
 | Polling + SSE hybrid | SSE for tab sync, 5s polling for cross-device. No WebSocket | ✓ Good |
 | Last-Write-Wins conflicts | Optimistic concurrency with version bump. CRDTs overkill | ✓ Good |
 | Single NEXTAUTH_URL env var | One variable to change per deployment. No hardcoded URLs | ✓ Good |
-
-## Current Milestone: v2.0 Krepza Rebrand + Ad Monetization
-
-**Goal:** Rebrand from "LT Grocery" to "Krepza" with Google AdSense monetization and domain-agnostic deployment.
-
-**Target features:**
-- Full rebrand (i18n, metadata, layout, favicons, static pages)
-- Google AdSense in all 5 existing ad slot types across 9 pages
-- Domain-agnostic deployment (env-var-driven, no hardcoded URLs)
-- Updated privacy/data-deletion pages with Krepza branding
+| Inline SVG logo component | Consistent with lucide-react icon pattern, Tailwind-customizable | ✓ Good |
+| Custom GDPR consent banner | No external dependency, fixed bottom bar, localStorage persistence | ✓ Good |
+| AdSense via next/script | afterInteractive strategy, conditional on NEXT_PUBLIC_ADSENSE_ID | ✓ Good |
+| Scraper git identity unchanged | Infrastructure identity separate from user-facing branding | ✓ Good |
 
 ## Evolution
 
@@ -100,4 +95,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-29 — milestone v2.0 started*
+*Last updated: 2026-04-29 after v2.0 milestone*
