@@ -261,8 +261,14 @@ export default function DashboardPage() {
   // Phase 2 state
   const [basketHero, setBasketHero] = useState<BasketHeroData | null | "loading">("loading");
   const [widgetData, setWidgetData] = useState<WidgetData | null>(null);
+  const [orphanCount, setOrphanCount] = useState<number>(0);
+  const [migrating, setMigrating] = useState(false);
 
   useEffect(() => {
+    fetch("/api/migration")
+      .then((r) => r.json())
+      .then((data: { orphanCount: number }) => setOrphanCount(data.orphanCount || 0))
+      .catch(() => {});
     // Fetch deal products
     const dealsUrl = `/api/deals?limit=96&lang=${language}${minDiscount > 0 ? `&minDiscount=${minDiscount}` : ""}${dealCategory ? `&category=${dealCategory}` : ""}`;
     fetch(dealsUrl)
@@ -463,6 +469,43 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      {orphanCount > 0 && (
+        <div className="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/20 px-5 py-4 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              {language === "lt"
+                ? `Turite ${orphanCount} nepriskirtą pirkinių sąrašą. Perkelti į savo paskyrą?`
+                : `You have ${orphanCount} unclaimed grocery list${orphanCount !== 1 ? "s" : ""}. Move to your account?`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={migrating}
+              onClick={() => {
+                setMigrating(true);
+                fetch("/api/migration", { method: "POST" })
+                  .then((r) => r.json())
+                  .then((data: { claimed: number }) => {
+                    setOrphanCount(0);
+                    setStats((prev) =>
+                      prev
+                        ? { ...prev, activeListCount: (prev.activeListCount || 0) + data.claimed }
+                        : prev
+                    );
+                  })
+                  .catch(() => {})
+                  .finally(() => setMigrating(false));
+              }}
+              className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            >
+              {migrating
+                ? language === "lt" ? "Perkeliama..." : "Moving..."
+                : language === "lt" ? "Perkelti" : "Claim"}
+            </button>
+          </div>
+        </div>
+      )}
       {/* ── Section A: Basket Hero ──────────────────────────────────────── */}
       {basketHero === "loading" ? (
         <div className="animate-pulse bg-muted h-28 rounded-xl" />

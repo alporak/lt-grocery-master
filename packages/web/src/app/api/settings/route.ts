@@ -1,30 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSettings, setSetting } from "@/lib/settings";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { getSettings, setSettingsForUser } from "@/lib/settings";
 import { geocodeAddress } from "@/lib/distance";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const settings = await getSettings();
+  const session = await getServerSession(authOptions);
+  const settings = await getSettings(session?.user?.id ?? null);
   return NextResponse.json(settings);
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json();
-
-  for (const [key, value] of Object.entries(body)) {
-    await setSetting(key, value);
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // If address changed, geocode it
+  const body = await req.json();
+
+  await setSettingsForUser(session.user.id, body);
+
   if (body.address && typeof body.address === "string" && body.address.trim()) {
     const coords = await geocodeAddress(body.address);
     if (coords) {
-      await setSetting("lat", coords.lat);
-      await setSetting("lng", coords.lng);
+      await setSettingsForUser(session.user.id, {
+        lat: coords.lat,
+        lng: coords.lng,
+      });
     }
   }
 
-  const settings = await getSettings();
+  const settings = await getSettings(session.user.id);
   return NextResponse.json(settings);
 }

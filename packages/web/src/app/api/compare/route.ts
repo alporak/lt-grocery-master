@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { compareGroceryList } from "@/lib/compare";
 import { getSettings } from "@/lib/settings";
 import { geocodeAddress } from "@/lib/distance";
@@ -8,6 +10,8 @@ export const dynamic = "force-dynamic";
 let geoCache: { address: string; lat: number; lng: number } | null = null;
 
 export async function POST(req: NextRequest) {
+  const session = await getServerSession(authOptions);
+
   const body = await req.json();
   const items = Array.isArray(body.items)
     ? body.items.map((i: { itemName: string; quantity: number; unit?: string; pinnedProductId?: number | null }) => ({
@@ -30,11 +34,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Resolve user location from settings
   let userLat: number | undefined;
   let userLng: number | undefined;
   try {
-    const settings = await getSettings();
+    const settings = await getSettings(session?.user?.id ?? null);
     const address = settings.address as string | undefined;
     if (address && address.length > 3) {
       if (geoCache && geoCache.address === address) {

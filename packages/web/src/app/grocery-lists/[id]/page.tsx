@@ -34,6 +34,7 @@ import {
   ClipboardList,
   Loader2,
   CreditCard,
+  RefreshCw,
 } from "lucide-react";
 import { parseItem, formatParsed, splitIngredientLine } from "@/lib/parse-item";
 import { computeLineCost } from "@/lib/cost";
@@ -42,6 +43,8 @@ import { ProductPreviewModal } from "@/components/ProductPreviewModal";
 import { getPreferredBrand, getBrandPreferences } from "@/lib/brandPreferences";
 import { matchesDietaryFilter, type DietaryFilter } from "@/lib/dietaryTags";
 import { AdSideRail, AdBanner } from "@/components/ads/AdSlot";
+import { useListSync } from "@/hooks/useListSync";
+import { cacheList, getCachedList } from "@/lib/cache";
 
 interface Suggestion {
   id: number;
@@ -91,6 +94,7 @@ interface StoreMatchLite {
 interface GroceryList {
   id: number;
   name: string;
+  version: number;
   items: GroceryItem[];
 }
 
@@ -248,11 +252,26 @@ export default function GroceryListDetailPage() {
 
   const fetchList = useCallback(() => {
     if (!params.id) return;
+    const id = Number(params.id);
     fetch(`/api/grocery-lists/${params.id}`)
       .then((r) => r.json())
-      .then(setList)
-      .catch(() => {});
+      .then((data: GroceryList) => {
+        setList(data);
+        cacheList(id, data);
+      })
+      .catch(() => {
+        const cached = getCachedList(id);
+        if (cached) {
+          setList(cached as GroceryList);
+        }
+      });
   }, [params.id]);
+
+  useListSync(
+    list ? Number(params.id) : null,
+    list?.version ?? 0,
+    () => fetchList()
+  );
 
   useEffect(() => {
     fetchList();
@@ -339,11 +358,22 @@ export default function GroceryListDetailPage() {
 
   const saveItems = async (items: GroceryItem[]) => {
     setSaving(true);
-    await fetch(`/api/grocery-lists/${params.id}`, {
+    const res = await fetch(`/api/grocery-lists/${params.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items, expectedVersion: list?.version }),
     });
+    if (res.status === 409) {
+      const data = await res.json();
+      if (data.list) {
+        setList(data.list);
+        cacheList(Number(params.id), data.list);
+      }
+    } else if (res.ok) {
+      const data = await res.json();
+      setList(data);
+      cacheList(Number(params.id), data);
+    }
     setSaving(false);
   };
 
@@ -354,12 +384,24 @@ export default function GroceryListDetailPage() {
       return;
     }
     setRenameSaving(true);
-    await fetch(`/api/grocery-lists/${params.id}`, {
+    const res = await fetch(`/api/grocery-lists/${params.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: trimmed }),
+      body: JSON.stringify({ name: trimmed, expectedVersion: list?.version }),
     });
-    setList({ ...list, name: trimmed });
+    if (res.status === 409) {
+      const data = await res.json();
+      if (data.list) {
+        setList(data.list);
+        cacheList(Number(params.id), data.list);
+      }
+    } else if (res.ok) {
+      const data = await res.json();
+      setList(data);
+      cacheList(Number(params.id), data);
+    } else {
+      setList({ ...list, name: trimmed });
+    }
     setIsRenaming(false);
     setRenameSaving(false);
   };

@@ -4,12 +4,18 @@ services:
       context: .
       dockerfile: packages/web/Dockerfile
     ports:
-      - "3130:3130"
+      - "3131:3131"
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
       - EMBEDDER_URL=http://embedder:8000
-      - PORT=3130
+      - PORT=3131
       - NODE_ENV=production
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - FACEBOOK_CLIENT_ID=${FACEBOOK_CLIENT_ID}
+      - FACEBOOK_CLIENT_SECRET=${FACEBOOK_CLIENT_SECRET}
     volumes:
       - ./packages/data:/app/data
     restart: unless-stopped

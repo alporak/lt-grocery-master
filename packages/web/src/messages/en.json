@@ -183,7 +183,10 @@
     "scraping": "Scraping...",
     "saved": "Settings saved",
     "importLocations": "Import store locations from web",
-    "importingLocations": "Importing store locations..."
+    "importingLocations": "Importing store locations...",
+    "sessions": "Sessions",
+    "activeNow": "Active now",
+    "lastActive": "Last active"
   },
   "theme": {
     "light": "Light",
@@ -212,5 +215,17 @@
     "visualDescription": "Point-and-click to select product elements from any website. No CSS knowledge needed.",
     "existingConfigs": "Saved Scrapers",
     "createConfig": "Create Scraper Config"
+  },
+  "auth": {
+    "signIn": "Sign In",
+    "signOut": "Sign Out",
+    "signInWithGoogle": "Sign in with Google",
+    "signInWithFacebook": "Sign in with Facebook",
+    "loginTitle": "Welcome to LT Grocery",
+    "loginDescription": "Sign in to sync your grocery lists across devices",
+    "signedInAs": "Signed in as",
+    "errorTitle": "Sign In Failed",
+    "errorDescription": "Could not sign in. Please try again.",
+    "tryAgain": "Try Again"
   }
 }

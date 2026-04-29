@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/components/i18n-provider";
 import { useTheme } from "@/components/theme-provider";
-import { Save, Sun, Moon, Droplets, MapPin, SlidersHorizontal, ChevronRight } from "lucide-react";
+import { Save, Sun, Moon, Droplets, MapPin, SlidersHorizontal, ChevronRight, Monitor } from "lucide-react";
 import Link from "next/link";
 
 export default function SettingsPage() {
@@ -216,6 +216,28 @@ export default function SettingsPage() {
           </Select>
         </CardContent>
       </Card>
+
+      {/* Sessions link */}
+      <Link href="/settings/sessions">
+        <Card className="hover:border-primary/60 transition-colors cursor-pointer">
+          <CardContent className="flex items-center gap-4 py-4">
+            <div className="flex items-center justify-center w-10 h-10 rounded-md bg-muted shrink-0">
+              <Monitor className="h-5 w-5" />
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium">
+                {t("settings.sessions") || "Sessions"}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {language === "lt"
+                  ? "Peržiūrėti aktyvius įrenginius"
+                  : "View active devices"}
+              </p>
+            </div>
+            <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+          </CardContent>
+        </Card>
+      </Link>
 
       {/* Advanced Settings link */}
       <Link href="/advanced-settings">

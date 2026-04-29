@@ -55,8 +55,8 @@ COPY packages/web/migrate-db.js ./migrate-db.js
 COPY packages/web/docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
-EXPOSE 3130
-ENV PORT=3130
+EXPOSE 3131
+ENV PORT=3131
 ENV HOSTNAME="0.0.0.0"
 
 ENTRYPOINT ["./docker-entrypoint.sh"]

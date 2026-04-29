@@ -183,7 +183,10 @@
     "scraping": "Nuskaitoma...",
     "saved": "Nustatymai išsaugoti",
     "importLocations": "Importuoti parduotuvių vietas iš interneto",
-    "importingLocations": "Importuojamos parduotuvių vietos..."
+    "importingLocations": "Importuojamos parduotuvių vietos...",
+    "sessions": "Seansai",
+    "activeNow": "Aktyvus dabar",
+    "lastActive": "Paskutinis aktyvumas"
   },
   "theme": {
     "light": "Šviesi",
@@ -212,5 +215,17 @@
     "visualDescription": "Spauskite ant elementų bet kurioje svetainėje, kad nurodytumėte produktų duomenis. CSS žinių nereikia.",
     "existingConfigs": "Išsaugoti nuskaitytuvai",
     "createConfig": "Sukurti nuskaitytuvo konfigūraciją"
+  },
+  "auth": {
+    "signIn": "Prisijungti",
+    "signOut": "Atsijungti",
+    "signInWithGoogle": "Prisijungti su Google",
+    "signInWithFacebook": "Prisijungti su Facebook",
+    "loginTitle": "Sveiki atvykę į LT Grocery",
+    "loginDescription": "Prisijunkite, kad sinchronizuotumėte pirkinių sąrašus tarp įrenginių",
+    "signedInAs": "Prisijungęs kaip",
+    "errorTitle": "Prisijungti nepavyko",
+    "errorDescription": "Nepavyko prisijungti. Bandykite dar kartą.",
+    "tryAgain": "Bandyti dar kartą"
   }
 }

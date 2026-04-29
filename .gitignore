@@ -8,3 +8,4 @@ data/embeddings/
 *.log
 packages/data/grocery.db
 .claude/*
+.planning/

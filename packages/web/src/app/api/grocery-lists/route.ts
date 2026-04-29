@@ -1,10 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const lists = await prisma.groceryList.findMany({
+    where: { userId: session.user.id },
     include: {
       items: true,
       _count: { select: { items: true } },
@@ -16,6 +24,11 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const body = await req.json();
   const name = body.name?.trim();
 
@@ -26,6 +39,7 @@ export async function POST(req: NextRequest) {
   const list = await prisma.groceryList.create({
     data: {
       name,
+      userId: session.user.id,
       items: {
         create: (body.items || []).map(
           (item: { itemName: string; quantity?: number; unit?: string }) => ({
