@@ -1,5 +1,17 @@
 # Krepza — Lithuanian Grocery Price Tracker
 
+## Current Milestone: v3.0 Production Deployment
+
+**Goal:** Deploy Krepza to krepza.lt via Cloudflare Tunnel with production hardening, AdSense registration, and best-practice security.
+
+**Target features:**
+- Cloudflare account + domain setup (krepza.lt, DNS)
+- Cloudflare Tunnel as Docker container (cloudflared) in docker-compose
+- Web container served publicly via tunnel on krepza.lt
+- Scraper/embedder stay internal (health endpoints only exposed)
+- AdSense site verification + ads.txt + approval submission
+- Production hardening (security headers, health checks, monitoring, backups, logging)
+
 ## What This Is
 
 Krepza is a self-hosted Lithuanian grocery price tracker with seamless social login (Google/Facebook), per-user grocery lists, cross-device sync, session management, and Google AdSense monetization.
@@ -31,7 +43,12 @@ User logs in with one click (Google/Facebook) and their grocery lists follow the
 
 ### Active
 
-(None — start new milestone for fresh scope)
+- [ ] Cloudflare account and domain setup (krepza.lt)
+- [ ] Cloudflare Tunnel via Docker container (cloudflared)
+- [ ] Web container served publicly on krepza.lt
+- [ ] Scraper/embedder health endpoints
+- [ ] AdSense site verification, ads.txt, and approval
+- [ ] Production hardening (security headers, health checks, monitoring, backups, logging)
 
 ### Out of Scope
 
@@ -52,6 +69,7 @@ User logs in with one click (Google/Facebook) and their grocery lists follow the
 - Krepza logo as inline SVG component (matching lucide-react pattern)
 - Ad components conditionally rendered via NEXT_PUBLIC_ADSENSE_ID env var
 - ~6 new files created: logo.tsx, consent-banner.tsx, plus asset files in public/
+- Domain purchased (krepza.lt), deploying via Cloudflare Tunnel with cloudflared Docker container
 
 ## Constraints
 
@@ -94,5 +112,4 @@ This document evolves at phase transitions and milestone boundaries.
 3. Audit Out of Scope — reasons still valid?
 4. Update Context with current state
 
----
-*Last updated: 2026-04-29 after v2.0 milestone*
+---\n*Last updated: 2026-04-29 after v3.0 milestone start*
