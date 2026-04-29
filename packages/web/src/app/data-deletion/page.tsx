@@ -16,7 +16,7 @@ export default async function DataDeletionPage() {
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">How to Delete Your Data</h2>
         <p>
-          LT Grocery is a self-hosted application. All your data is stored
+          Krepza is a self-hosted application. All your data is stored
           exclusively on the server where the application is installed.
         </p>
         <p>You have two options to delete your data:</p>
@@ -27,7 +27,7 @@ export default async function DataDeletionPage() {
           </li>
           <li>
             <strong>Contact the server administrator</strong> — The person who
-            installed LT Grocery can manually remove your data.
+            installed Krepza can manually remove your data.
           </li>
         </ol>
       </section>

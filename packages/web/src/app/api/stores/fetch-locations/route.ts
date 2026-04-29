@@ -31,7 +31,7 @@ async function geocode(address: string, city: string): Promise<{ lat: number; ln
     const q = encodeURIComponent(`${address}, ${city}, Lithuania`);
     const res = await fetch(
       `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1&countrycodes=lt`,
-      { headers: { "User-Agent": "lt-grocery-master/1.0" } }
+      { headers: { "User-Agent": "krepza/2.0" } }
     );
     const data = await res.json();
     if (data?.[0]) {

@@ -29,7 +29,7 @@ export default async function PrivacyPage() {
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">2. How We Use Your Data</h2>
         <p>
-          Your data is used exclusively to provide the LT Grocery service:
+          Your data is used exclusively to provide the Krepza service:
           displaying your grocery lists, comparing prices across stores, and
           syncing your lists between your devices.
         </p>
@@ -39,7 +39,7 @@ export default async function PrivacyPage() {
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">3. Data Storage</h2>
         <p>
-          All data is stored on the server where LT Grocery is installed. No data
+          All data is stored on the server where Krepza is installed. No data
           is sent to external analytics services. Your session is managed via a
           secure JWT token stored in your browser.
         </p>
@@ -58,7 +58,7 @@ export default async function PrivacyPage() {
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">5. Contact</h2>
         <p>
-          LT Grocery is self-hosted. For privacy concerns, contact the server
+          Krepza is self-hosted. For privacy concerns, contact the server
           administrator.
         </p>
       </section>
