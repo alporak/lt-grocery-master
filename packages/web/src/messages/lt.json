@@ -1,6 +1,6 @@
 {
   "common": {
-    "appName": "LT Grocery",
+    "appName": "Krepza",
     "loading": "Kraunama...",
     "save": "Išsaugoti",
     "cancel": "Atšaukti",
@@ -221,7 +221,7 @@
     "signOut": "Atsijungti",
     "signInWithGoogle": "Prisijungti su Google",
     "signInWithFacebook": "Prisijungti su Facebook",
-    "loginTitle": "Sveiki atvykę į LT Grocery",
+    "loginTitle": "Sveiki atvykę į Krepza",
     "loginDescription": "Prisijunkite, kad sinchronizuotumėte pirkinių sąrašus tarp įrenginių",
     "signedInAs": "Prisijungęs kaip",
     "errorTitle": "Prisijungti nepavyko",

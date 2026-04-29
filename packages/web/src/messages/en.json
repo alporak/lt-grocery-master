@@ -1,6 +1,6 @@
 {
   "common": {
-    "appName": "LT Grocery",
+    "appName": "Krepza",
     "loading": "Loading...",
     "save": "Save",
     "cancel": "Cancel",
@@ -221,7 +221,7 @@
     "signOut": "Sign Out",
     "signInWithGoogle": "Sign in with Google",
     "signInWithFacebook": "Sign in with Facebook",
-    "loginTitle": "Welcome to LT Grocery",
+    "loginTitle": "Welcome to Krepza",
     "loginDescription": "Sign in to sync your grocery lists across devices",
     "signedInAs": "Signed in as",
     "errorTitle": "Sign In Failed",

@@ -3,12 +3,14 @@
 import { ReactNode } from "react";
 import { SessionProvider } from "next-auth/react";
 import { ThemeProvider } from "./theme-provider";
-import { I18nProvider } from "./i18n-provider";
+import { I18nProvider, useI18n } from "./i18n-provider";
 import { Sidebar, BottomNav } from "./navigation";
 import { LanguageSwitcher } from "./language-switcher";
 import { AuthButton } from "./auth-button";
 
 export function ClientProviders({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
+
   return (
     <SessionProvider refetchInterval={5 * 60}>
       <ThemeProvider>
@@ -19,7 +21,7 @@ export function ClientProviders({ children }: { children: ReactNode }) {
             {/* Top bar */}
             <header className="sticky top-0 z-40 h-16 border-b bg-card flex items-center justify-between px-4 md:px-6">
               <div className="md:hidden text-lg font-bold text-primary">
-                🛒 LT Grocery
+                🛒 {t("common.appName")}
               </div>
               <div className="flex items-center gap-3 ml-auto">
                 <AuthButton />

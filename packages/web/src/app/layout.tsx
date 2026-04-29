@@ -6,8 +6,15 @@ import { ClientProviders } from "@/components/client-providers";
 const inter = Inter({ subsets: ["latin", "latin-ext"] });
 
 export const metadata: Metadata = {
-  title: "LT Grocery - Price Checker",
-  description: "Lithuanian grocery price comparison and shopping list tool",
+  title: "Krepza - Price Checker",
+  description: "Krepza — Lithuanian grocery price comparison and shopping list tool",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icon.svg", type: "image/svg+xml" },
+    ],
+    apple: { url: "/icon.png" },
+  },
 };
 
 export default function RootLayout({
