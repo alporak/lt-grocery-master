@@ -41,7 +41,12 @@ Krepza evolves from a working grocery price tracker with OAuth auth and AdSense 
   3. OAuth login flow works with Google and Facebook using the production callback URLs at `https://krepza.lt`
   4. The tunnel operates without exposing any ports on the host machine — `ss -tlnp` shows no public-facing ports
   5. Zero hardcoded domain references remain — all routing uses env vars (`NEXTAUTH_URL`, `TUNNEL_TOKEN`)
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 08-01-PLAN.md — Docker Tunnel Configuration: add cloudflared service to docker-compose.yml, update .env.example with TUNNEL_TOKEN and NEXTAUTH_URL=https://krepza.lt
+- [ ] 08-02-PLAN.md — Cloudflare Infrastructure Setup Guide: step-by-step Cloudflare account/domain/tunnel creation, OAuth callback URL configuration in Google Cloud Console and Facebook Developers
+- [ ] 08-03-PLAN.md — Tunnel Verification & Port Hardening: deploy cloudflared, verify HTTPS end-to-end, confirm OAuth login, remove web port exposure per D-02
 
 ### Phase 9: AdSense Readiness
 **Goal**: All AdSense verification artifacts are in place and the site is submitted for review with correct monetization configuration
@@ -85,7 +90,7 @@ Krepza evolves from a working grocery price tracker with OAuth auth and AdSense 
 | 5. Complete Rebrand | v2.0 | 3/3 | Complete | 2026-04-29 |
 | 6. AdSense Integration | v2.0 | 2/2 | Complete | 2026-04-29 |
 | 7. Domain-Agnostic Deploy | v2.0 | 1/1 | Complete | 2026-04-29 |
-| 8. Tunnel Infrastructure | v3.0 | 0/TBD | Not started | - |
+| 8. Tunnel Infrastructure | v3.0 | 0/3 | Not started | - |
 | 9. AdSense Readiness | v3.0 | 0/TBD | Not started | - |
 | 10. Production Hardening | v3.0 | 0/TBD | Not started | - |
 | 11. Verification & Launch | v3.0 | 0/TBD | Not started | - |
