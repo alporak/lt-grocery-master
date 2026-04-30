@@ -74,7 +74,12 @@ Plans:
   3. All HTTP responses include security headers (HSTS, X-Content-Type-Options, Referrer-Policy, Permissions-Policy) confirmed by `curl -I https://krepza.lt`
   4. Docker logs are compact and rotated — no single service exceeds the 10 MB / 3 file limit
   5. Search engines can crawl the homepage but are blocked from API routes — verified via `curl https://krepza.lt/robots.txt`
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 10-01-PLAN.md — Health Check Endpoints: /api/health route on web, HTTP health server on scraper (HRDN-01, HRDN-02)
+- [ ] 10-02-PLAN.md — Backup System: sqlite3 .backup cron job with 30-day retention in Docker sidecar (HRDN-05, HRDN-06)
+- [ ] 10-03-PLAN.md — Docker Hardening: HEALTHCHECK on all services, service_healthy depends_on, json-file log rotation (HRDN-03, HRDN-04, HRDN-08, HRDN-10)
 
 ### Phase 11: Verification & Launch
 **Goal**: Every production-critical feature is verified through active testing and the deployment is confirmed ready for public use
@@ -97,7 +102,7 @@ Plans:
 | 7. Domain-Agnostic Deploy | v2.0 | 1/1 | Complete | 2026-04-29 |
 | 8. Tunnel Infrastructure | v3.0 | 0/3 | Not started | - |
 | 9. AdSense Readiness | v3.0 | 0/3 | Not started | - |
-| 10. Production Hardening | v3.0 | 0/TBD | Not started | - |
+| 10. Production Hardening | v3.0 | 0/3 | Not started | - |
 | 11. Verification & Launch | v3.0 | 0/TBD | Not started | - |
 
 ---
