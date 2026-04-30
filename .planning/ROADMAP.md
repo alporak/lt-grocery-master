@@ -57,7 +57,12 @@ Plans:
   2. No CSP violations appear in browser DevTools Console when loading ad components on any page of the site
   3. AdSense ad units render on the site using the real publisher ID — confirmed via browser Network tab showing ad requests
   4. AdSense site review dashboard shows "In review" status with site ownership verified
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 09-01-PLAN.md — Static AdSense Verification Files: ads.txt, robots.txt, site verification meta tag, and env documentation
+- [ ] 09-02-PLAN.md — CSP + Security Headers: Content-Security-Policy with AdSense origins, HSTS, X-Frame-Options (SAMEORIGIN), and all production security headers via next.config.js
+- [ ] 09-03-PLAN.md — AdSense Publisher ID + Site Submission: verify all artifacts, guide user through setting publisher ID and submitting site to AdSense for review
 
 ### Phase 10: Production Hardening
 **Goal**: The deployment is resilient to failures, backed up daily, and follows security best practices for production self-hosting
@@ -91,7 +96,7 @@ Plans:
 | 6. AdSense Integration | v2.0 | 2/2 | Complete | 2026-04-29 |
 | 7. Domain-Agnostic Deploy | v2.0 | 1/1 | Complete | 2026-04-29 |
 | 8. Tunnel Infrastructure | v3.0 | 0/3 | Not started | - |
-| 9. AdSense Readiness | v3.0 | 0/TBD | Not started | - |
+| 9. AdSense Readiness | v3.0 | 0/3 | Not started | - |
 | 10. Production Hardening | v3.0 | 0/TBD | Not started | - |
 | 11. Verification & Launch | v3.0 | 0/TBD | Not started | - |
 
