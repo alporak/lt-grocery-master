@@ -38,6 +38,62 @@ function addCol(table, col, def) {
 }
 
 try {
+  // Auth tables (next-auth Prisma adapter — created after initial schema)
+  if (!tableExists('User')) {
+    run(`
+      CREATE TABLE "User" (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT,
+        email TEXT UNIQUE,
+        emailVerified DATETIME,
+        image TEXT
+      );
+    `);
+    console.log('  + User table');
+  }
+  if (!tableExists('Account')) {
+    run(`
+      CREATE TABLE "Account" (
+        id TEXT PRIMARY KEY NOT NULL,
+        userId TEXT NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        providerAccountId TEXT NOT NULL,
+        refresh_token TEXT,
+        access_token TEXT,
+        expires_at INTEGER,
+        token_type TEXT,
+        scope TEXT,
+        id_token TEXT,
+        session_state TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS "Account_provider_providerAccountId_key" ON "Account"("provider", "providerAccountId");
+    `);
+    console.log('  + Account table');
+  }
+  if (!tableExists('Session')) {
+    run(`
+      CREATE TABLE "Session" (
+        id TEXT PRIMARY KEY NOT NULL,
+        sessionToken TEXT NOT NULL UNIQUE,
+        userId TEXT NOT NULL REFERENCES "User"(id) ON DELETE CASCADE,
+        expires DATETIME NOT NULL
+      );
+    `);
+    console.log('  + Session table');
+  }
+  if (!tableExists('VerificationToken')) {
+    run(`
+      CREATE TABLE "VerificationToken" (
+        identifier TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        expires DATETIME NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS "VerificationToken_identifier_token_key" ON "VerificationToken"("identifier", "token");
+    `);
+    console.log('  + VerificationToken table');
+  }
+
   // Product columns added after initial schema
   addCol('Product', 'searchIndex',       'TEXT');
   addCol('Product', 'barcode',           'TEXT');

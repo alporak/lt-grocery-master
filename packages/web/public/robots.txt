@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /$
+Allow: /ads.txt
+Disallow: /api/
+Disallow: /_next/
+Disallow: /auth/

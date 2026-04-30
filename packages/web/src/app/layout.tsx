@@ -16,6 +16,9 @@ export const metadata: Metadata = {
     ],
     apple: { url: "/icon.png" },
   },
+  other: process.env.NEXT_PUBLIC_ADSENSE_ID
+    ? { "google-adsense-account": `ca-${process.env.NEXT_PUBLIC_ADSENSE_ID}` }
+    : undefined,
 };
 
 export default function RootLayout({

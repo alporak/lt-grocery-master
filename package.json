@@ -6,10 +6,10 @@
     "packages/*"
   ],
   "scripts": {
-    "up": "docker compose up -d --build web scraper embedder",
-    "down": "docker compose down web scraper embedder",
-    "down:clean": "docker compose down -v web scraper embedder",
-    "logs": "docker compose logs -f web scraper embedder",
+    "up": "docker compose up -d --build web scraper embedder cloudflared",
+    "down": "docker compose down",
+    "down:clean": "docker compose down -v",
+    "logs": "docker compose logs -f",
     "export-data": "docker compose exec embedder python -c \"from main import _do_export; print(_do_export())\"",
     "import-data": "docker compose exec embedder python -c \"from main import _do_import; print(_do_import())\"",
     "process-embeddings": "docker compose exec embedder python -c \"import httpx; print(httpx.post('http://localhost:8000/process').json())\"",

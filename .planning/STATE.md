@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** User logs in with one click (Google/Facebook) and their grocery lists follow them to any device.
-**Current focus:** Phase 8 — Tunnel Infrastructure
+**Current focus:** Phase 8 — Tunnel Infrastructure ✓ complete. Next: Phase 9 — AdSense Readiness.
 
 ## Current Position
 
-Phase: 8 of 11 (Tunnel Infrastructure)
-Plan: TBD
-Status: Ready to plan
-Last activity: 2026-04-29 — v3.0 roadmap created
+Phase: 8 of 11 (Tunnel Infrastructure) ✓ COMPLETE
+Plan: 3/3 plans executed
+Status: Phase 8 ready for transition
+Last activity: 2026-04-30 — Phase 8 verified: tunnel live, OAuth working, port locked
 
-Progress: [░░░░░░░░░░] 0% (v3.0 milestone phases)
+Progress: [██░░░░░░░░] 25% (v3.0 milestone phases)
 
 ## Performance Metrics
 

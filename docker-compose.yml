@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: packages/web/Dockerfile
     ports:
-      - "3131:3131"
+      - "127.0.0.1:3131:3131"
     environment:
       - DATABASE_URL=file:/app/data/grocery.db
       - EMBEDDER_URL=http://embedder:8000
@@ -55,4 +55,15 @@ services:
       resources:
         limits:
           memory: 512M
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    environment:
+      - TUNNEL_METRICS=0.0.0.0:49312
+      - TUNNEL_LOGLEVEL=info
+    depends_on:
+      web:
+        condition: service_started
     restart: unless-stopped
