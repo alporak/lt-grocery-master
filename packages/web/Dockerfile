@@ -27,7 +27,7 @@ ENV NODE_ENV=production
 RUN deluser node 2>/dev/null; delgroup node 2>/dev/null; \
     addgroup --system --gid 1000 nodejs && \
     adduser --system --uid 1000 nextjs && \
-    apk add --no-cache su-exec sqlite
+    apk add --no-cache su-exec sqlite curl
 
 # Copy standalone output
 COPY --from=builder /app/packages/web/.next/standalone ./

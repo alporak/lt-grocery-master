@@ -19,7 +19,18 @@ services:
       - FACEBOOK_CLIENT_SECRET=${FACEBOOK_CLIENT_SECRET}
     volumes:
       - ./packages/data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3131/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   scraper:
     build:
@@ -35,9 +46,22 @@ services:
     volumes:
       - ./packages/data:/app/data
     depends_on:
-      - web
-      - embedder
+      web:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   embedder:
     build:
@@ -55,7 +79,18 @@ services:
       resources:
         limits:
           memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -65,5 +100,33 @@ services:
       - TUNNEL_LOGLEVEL=info
     depends_on:
       web:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:49312/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backup:
+    image: alpine:3.20
+    command: sh -c "apk add --no-cache sqlite dcron && echo '0 3 * * * /scripts/backup.sh >> /var/log/backup.log 2>&1' | crontab - && crond -f -l 2"
+    volumes:
+      - ./packages/data:/app/data:ro
+      - ./backups:/backups
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DB_PATH=/app/data/grocery.db
+      - BACKUP_DIR=/backups
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

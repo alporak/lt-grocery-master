@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { runScrapeJob, syncDataRepo } from "./scrape-job.js";
 import prisma from "./db.js";
+import * as http from "http";
 
 async function getInterval(): Promise<number> {
   try {
@@ -28,6 +29,19 @@ async function isScheduledScrapeEnabled(): Promise<boolean> {
 
 async function main() {
   console.log("[Scheduler] Starting scraper service...");
+
+  const healthServer = http.createServer((_req, res) => {
+    if (_req.method === "GET" && (_req.url === "/health" || _req.url === "/")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  healthServer.listen(9000, "0.0.0.0", () => {
+    console.log("[Health] Scraper health server listening on :9000");
+  });
   let running = false;
   let lastHandledRequest = "";
 

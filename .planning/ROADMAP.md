@@ -91,7 +91,11 @@ Plans:
   3. Browser DevTools Console shows zero CSP violations when browsing pages with ad components loaded
   4. A restored SQLite backup passes `PRAGMA integrity_check` with no corruption detected
   5. An unauthenticated (incognito) visitor can access the homepage, `ads.txt`, and `robots.txt` without errors
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 11-01-PLAN.md — OAuth & Public Access Verification: Google/Facebook login E2E on krepza.lt + incognito crawl test of ads.txt, robots.txt, homepage
+- [ ] 11-02-PLAN.md — Ad & Infrastructure Integrity: CSP violation audit, AdSense tag rendering verification, SQLite backup restore integrity test
 
 ## Progress
 
@@ -103,7 +107,7 @@ Plans:
 | 8. Tunnel Infrastructure | v3.0 | 0/3 | Not started | - |
 | 9. AdSense Readiness | v3.0 | 0/3 | Not started | - |
 | 10. Production Hardening | v3.0 | 0/3 | Not started | - |
-| 11. Verification & Launch | v3.0 | 0/TBD | Not started | - |
+| 11. Verification & Launch | v3.0 | 0/2 | Not started | - |
 
 ---
 *Roadmap updated: 2026-04-29 after v3.0 roadmapping*
